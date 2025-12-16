@@ -1,0 +1,5 @@
+{
+  "name": "StepGrid16",
+  "description": "A 16-step pattern sequencer with per-step parameter locks, macro controls, and MIDI output.",
+  "requestFramePermissions": []
+}
