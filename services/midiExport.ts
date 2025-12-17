@@ -57,37 +57,40 @@ export const downloadMidi = (patterns: Pattern[], chain: number[], activePattern
       const stepStartTick = currentTick;
       
       if (step.active) {
-        // Calculate Microtiming
-        // Range -50 to +50. 
-        // offset = (microTiming / 100) * ticksPerSixteenth
-        const offset = Math.round((step.microTiming / 100) * ticksPerSixteenth);
-        const noteOnTick = stepStartTick + offset;
+        // Microtiming (milliseconds) -> ticks
+        // Law: ticks = (ms / 1000) * (tempo * PPQ / 60)
+        const offsetTicks = Math.round((step.microTiming / 1000) * (tempo * PPQ / 60));
+        
+        // Clamp noteOnTick once to ensure we don't start before 0
+        const noteOnTick = Math.max(0, stepStartTick + offsetTicks);
         
         // Calculate Duration
-        // gate 1-100%
+        // gate 1-100% of a sixteenth note
         const duration = Math.round((step.gate / 100) * ticksPerSixteenth);
+        
+        // derive noteOffTick from the clamped noteOnTick to preserve deterministic gate length
         const noteOffTick = noteOnTick + duration;
 
         // CC Macros (20 & 21)
-        // We place CCs at the NoteOn time to ensure parameters are set for the note
+        // CC events are placed at the same tick as note-on (after offset) to maintain phase-alignment
         events.push({
-            tick: Math.max(0, noteOnTick),
+            tick: noteOnTick,
             data: [0xB0, 20, step.macroA]
         });
         events.push({
-            tick: Math.max(0, noteOnTick),
+            tick: noteOnTick,
             data: [0xB0, 21, step.macroB]
         });
 
         // Note On
         events.push({
-          tick: Math.max(0, noteOnTick),
+          tick: noteOnTick,
           data: [0x90, step.note, step.velocity]
         });
 
         // Note Off
         events.push({
-          tick: Math.max(0, noteOffTick),
+          tick: noteOffTick,
           data: [0x80, step.note, 0]
         });
       }

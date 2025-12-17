@@ -15,6 +15,18 @@ import Knob from './components/Knob';
 // Audio Context
 const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
 
+// --- Persistence Helpers ---
+const STORAGE_KEY = 'stepgrid16:v1';
+
+function safeParse<T>(raw: string | null): T | null {
+  if (!raw) return null;
+  try { return JSON.parse(raw) as T; } catch { return null; }
+}
+
+function saveToDisk(payload: any) {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(payload)); } catch {}
+}
+
 export default function App() {
   // --- Data State ---
   const [patterns, setPatterns] = useState<Pattern[]>(INITIAL_PATTERNS);
@@ -29,7 +41,8 @@ export default function App() {
     scaleType: ScaleType.MINOR,
     scaleFold: false,
     chain: [],
-    chainStep: 0
+    chainStep: 0,
+    chainLoop: false, // Explicit loop policy
   });
   
   // --- UI State ---
@@ -39,6 +52,7 @@ export default function App() {
   // Refs for Audio Engine
   const stateRef = useRef(state);
   const patternsRef = useRef(patterns);
+  const patternClipboardRef = useRef<Pattern | null>(null);
   
   // Sync Refs
   useEffect(() => { stateRef.current = state; }, [state]);
@@ -50,6 +64,105 @@ export default function App() {
       setMidiOutputs(midiService.getOutputs());
     });
   }, []);
+
+  // --- MIDI Panic Logic ---
+  const panic = useCallback((outputId?: string | null) => {
+    const out = outputId !== undefined ? outputId : stateRef.current.midiOutputId;
+    const ch = stateRef.current.midiChannel;
+    midiService.sendCC(out, ch, 120, 0); // All Sound Off
+    midiService.sendCC(out, ch, 121, 0); // Reset Controllers
+    midiService.sendCC(out, ch, 123, 0); // All Notes Off
+  }, []);
+
+  // --- Persistence Effects ---
+  useEffect(() => {
+    const data = safeParse<{ patterns?: Pattern[]; state?: Partial<SequencerState> }>(
+      localStorage.getItem(STORAGE_KEY)
+    );
+    if (!data) return;
+
+    if (data.patterns) setPatterns(data.patterns);
+
+    if (data.state) {
+      setState(s => ({
+        ...s,
+        ...data.state,
+        isPlaying: false,
+        currentStep: -1,
+        chainStep: 0,
+      }));
+    }
+  }, []);
+
+  useEffect(() => {
+    saveToDisk({
+      patterns,
+      state: {
+        tempo: state.tempo,
+        activePatternIdx: state.activePatternIdx,
+        midiChannel: state.midiChannel,
+        midiOutputId: state.midiOutputId,
+        rootNote: state.rootNote,
+        scaleType: state.scaleType,
+        scaleFold: state.scaleFold,
+        chain: state.chain,
+        chainLoop: state.chainLoop,
+      },
+    });
+  }, [patterns, state]);
+
+  // Safety: Panic on blur/visibility
+  useEffect(() => {
+    const onBlur = () => panic();
+    const onVis = () => { if (document.hidden) panic(); };
+
+    window.addEventListener('blur', onBlur);
+    document.addEventListener('visibilitychange', onVis);
+    return () => {
+      window.removeEventListener('blur', onBlur);
+      document.removeEventListener('visibilitychange', onVis);
+    };
+  }, [panic]);
+
+  // --- Pattern Operations ---
+  const clearPattern = (idx: number) => {
+    setPatterns(ps => {
+      const next = [...ps];
+      const p = next[idx];
+      next[idx] = {
+        ...p,
+        steps: p.steps.map(s => ({
+          ...s,
+          active: false,
+        })),
+      };
+      return next;
+    });
+    setSelectedStepIdx(null);
+  };
+
+  const copyPattern = (idx: number) => {
+    patternClipboardRef.current = structuredClone(patternsRef.current[idx]);
+  };
+
+  const pastePattern = (idx: number) => {
+    const clip = patternClipboardRef.current;
+    if (!clip) return;
+    setPatterns(ps => {
+      const next = [...ps];
+      next[idx] = structuredClone(clip);
+      return next;
+    });
+  };
+
+  const duplicateToNext = (idx: number) => {
+    const nextIdx = (idx + 1) % 8;
+    setPatterns(ps => {
+      const next = [...ps];
+      next[nextIdx] = structuredClone(ps[idx]);
+      return next;
+    });
+  };
 
   // --- Engine Constants ---
   const nextNoteTime = useRef<number>(0.0);
@@ -68,25 +181,34 @@ export default function App() {
     const currentIdx = currentStepRef.current;
     
     // Pattern Advancement Logic
-    // If we are at the end of a pattern (step 15 -> 0)
     if (currentIdx === 15) {
-       const currentState = stateRef.current;
-       if (currentState.chain.length > 0) {
-          // Advance chain
-          const nextChainStep = (currentState.chainStep + 1) % currentState.chain.length;
+      const currentState = stateRef.current;
+
+      if (currentState.chain.length > 0) {
+        const nextChainStepRaw = currentState.chainStep + 1;
+
+        if (nextChainStepRaw >= currentState.chain.length) {
+          if (currentState.chainLoop) {
+            const nextChainStep = 0;
+            const nextPatternIdx = currentState.chain[0];
+            setState(s => ({ ...s, chainStep: nextChainStep, activePatternIdx: nextPatternIdx }));
+            stateRef.current.chainStep = nextChainStep;
+            stateRef.current.activePatternIdx = nextPatternIdx;
+          } else {
+            const lastStep = currentState.chain.length - 1;
+            const lastPatternIdx = currentState.chain[lastStep];
+            setState(s => ({ ...s, chainStep: lastStep, activePatternIdx: lastPatternIdx }));
+            stateRef.current.chainStep = lastStep;
+            stateRef.current.activePatternIdx = lastPatternIdx;
+          }
+        } else {
+          const nextChainStep = nextChainStepRaw;
           const nextPatternIdx = currentState.chain[nextChainStep];
-          
-          // We update state for the UI, but we must also ensure the engine knows 
-          // to pull from the new pattern immediately for the next step (0).
-          setState(s => ({ 
-              ...s, 
-              chainStep: nextChainStep, 
-              activePatternIdx: nextPatternIdx 
-          }));
-          // Sync refs immediately for the scheduler
+          setState(s => ({ ...s, chainStep: nextChainStep, activePatternIdx: nextPatternIdx }));
           stateRef.current.chainStep = nextChainStep;
           stateRef.current.activePatternIdx = nextPatternIdx;
-       }
+        }
+      }
     }
 
     currentStepRef.current = (currentStepRef.current + 1) % 16;
@@ -102,19 +224,15 @@ export default function App() {
     const step = pattern.steps[stepNumber];
 
     if (step && step.active) {
-       // Micro-timing
-       // +/- 50% of a 16th note
        const secondsPerBeat = 60.0 / stateRef.current.tempo;
        const sixteenth = secondsPerBeat / 4;
-       const offset = (step.microTiming / 100) * sixteenth; 
-       
+       const offset = step.microTiming / 1000; 
        const playTime = time + offset;
        const duration = (step.gate / 100) * sixteenth;
 
        midiService.sendCC(stateRef.current.midiOutputId, stateRef.current.midiChannel, 20, step.macroA);
        midiService.sendCC(stateRef.current.midiOutputId, stateRef.current.midiChannel, 21, step.macroB);
 
-       // Simple scheduling
        const timeUntilPlay = (playTime - audioCtx.currentTime) * 1000;
        const durationMs = duration * 1000;
 
@@ -126,7 +244,6 @@ export default function App() {
                }, durationMs);
            }, timeUntilPlay);
        } else {
-           // Play immediately if we're slightly late (catch up)
            midiService.sendNoteOn(stateRef.current.midiOutputId, stateRef.current.midiChannel, step.note, step.velocity);
            setTimeout(() => {
                midiService.sendNoteOff(stateRef.current.midiOutputId, stateRef.current.midiChannel, step.note);
@@ -149,15 +266,16 @@ export default function App() {
 
     if (!state.isPlaying) {
         currentStepRef.current = 0;
-        stateRef.current.chainStep = 0; // Reset chain on start? Or resume? Let's reset.
+        stateRef.current.chainStep = 0;
         if (state.chain.length > 0) {
             setState(s => ({...s, chainStep: 0, activePatternIdx: s.chain[0]}));
-            stateRef.current.activePatternIdx = state.chain[0]; // sync ref
+            stateRef.current.activePatternIdx = state.chain[0];
         }
         nextNoteTime.current = audioCtx.currentTime;
         setState(s => ({ ...s, isPlaying: true }));
         scheduler();
     } else {
+        panic(); // Stop all notes on sequence stop
         setState(s => ({ ...s, isPlaying: false, currentStep: -1 }));
         if (timerID.current) window.clearTimeout(timerID.current);
     }
@@ -167,13 +285,8 @@ export default function App() {
       const pattern = patterns[state.activePatternIdx];
       const newSteps = [...pattern.steps];
       const isActive = newSteps[index].active;
-      
-      // Toggle Active
       newSteps[index] = { ...newSteps[index], active: !isActive };
-      
-      // If turning ON, select it for editing.
       if (!isActive) setSelectedStepIdx(index);
-      
       const newPatterns = [...patterns];
       newPatterns[state.activePatternIdx] = { ...pattern, steps: newSteps };
       setPatterns(newPatterns);
@@ -186,14 +299,12 @@ export default function App() {
 
   const updateSelectedStep = (updates: Partial<StepData>) => {
       if (selectedStepIdx === null) return;
-      
       const pattern = patterns[state.activePatternIdx];
       const newSteps = [...pattern.steps];
       newSteps[selectedStepIdx] = {
           ...newSteps[selectedStepIdx],
           ...updates
       };
-      
       const newPatterns = [...patterns];
       newPatterns[state.activePatternIdx] = { ...pattern, steps: newSteps };
       setPatterns(newPatterns);
@@ -201,16 +312,14 @@ export default function App() {
 
   const handlePatternClick = (idx: number, isShift: boolean) => {
       if (isShift) {
-          // Add to Chain
           setState(s => ({...s, chain: [...s.chain, idx]}));
       } else {
-          // Select Pattern (Clears Chain)
-          setState(s => ({...s, activePatternIdx: idx, chain: [], chainStep: 0}));
+          setState(s => ({...s, activePatternIdx: idx, chain: [], chainStep: 0, chainLoop: false}));
       }
   };
 
   const clearChain = () => {
-      setState(s => ({...s, chain: []}));
+      setState(s => ({...s, chain: [], chainStep: 0, chainLoop: false}));
   };
 
   // --- Render Helpers ---
@@ -269,7 +378,12 @@ export default function App() {
                  <select 
                    className="bg-transparent text-xs text-slate-300 focus:outline-none w-32"
                    value={state.midiOutputId || ''}
-                   onChange={(e) => setState(s => ({...s, midiOutputId: e.target.value}))}
+                   onChange={(e) => {
+                     const nextId = e.target.value || null;
+                     const prevId = stateRef.current.midiOutputId;
+                     if (prevId && prevId !== nextId) panic(prevId);
+                     setState(s => ({ ...s, midiOutputId: nextId }));
+                   }}
                  >
                    <option value="">No MIDI Output</option>
                    {midiOutputs.map(o => (
@@ -286,19 +400,51 @@ export default function App() {
          {/* TOP ROW: Patterns & Chain */}
          <div className="flex flex-col md:flex-row gap-4 shrink-0 h-[80px]">
              {/* Pattern Select */}
-             <div className="flex-1 bg-slate-900 rounded-xl border border-slate-800 p-3 flex flex-col justify-center">
+             <div className="flex-1 bg-slate-900 rounded-xl border border-slate-800 p-3 flex flex-col justify-center relative">
                  <div className="flex justify-between items-center mb-2">
-                    <span className="text-[10px] font-bold uppercase text-slate-500">Patterns (Shift+Click to Chain)</span>
-                    {state.chain.length > 0 && (
-                        <div className="flex items-center gap-2 text-[10px] bg-slate-800 px-2 py-0.5 rounded-full border border-slate-700">
-                            <LinkIcon size={10} className="text-cyan-400"/>
-                            <span className="font-mono text-cyan-400 truncate max-w-[200px]">
-                                {state.chain.map(i => i + 1).join('→')}
-                            </span>
-                            <button onClick={clearChain} className="text-slate-500 hover:text-white ml-1 border-l border-slate-700 pl-2"><RefreshCw size={10} /></button>
+                    <div className="flex items-center gap-3">
+                        <span className="text-[10px] font-bold uppercase text-slate-500">Patterns (Shift+Click to Chain)</span>
+                        <div className="flex items-center gap-1">
+                            <button onClick={() => clearPattern(state.activePatternIdx)} className="px-2 py-1 text-[10px] font-bold uppercase rounded bg-slate-800 text-slate-400 hover:text-white transition-colors">
+                                Clear
+                            </button>
+                            <button onClick={() => copyPattern(state.activePatternIdx)} className="px-2 py-1 text-[10px] font-bold uppercase rounded bg-slate-800 text-slate-400 hover:text-white transition-colors">
+                                Copy
+                            </button>
+                            <button onClick={() => pastePattern(state.activePatternIdx)} className="px-2 py-1 text-[10px] font-bold uppercase rounded bg-slate-800 text-slate-400 hover:text-white transition-colors">
+                                Paste
+                            </button>
+                            <button onClick={() => duplicateToNext(state.activePatternIdx)} className="px-2 py-1 text-[10px] font-bold uppercase rounded bg-slate-800 text-slate-400 hover:text-white transition-colors">
+                                Dupe→
+                            </button>
                         </div>
-                    )}
+                    </div>
+                    <div className="flex items-center gap-2">
+                        {state.chain.length > 0 && (
+                            <div className="flex items-center gap-2 text-[10px] bg-slate-800 px-2 py-0.5 rounded-full border border-slate-700">
+                                <LinkIcon size={10} className="text-cyan-400"/>
+                                <span className="font-mono text-cyan-400 truncate max-w-[150px]">
+                                    {state.chain.map(i => i + 1).join('→')}
+                                </span>
+                                
+                                <button
+                                  onClick={() => setState(s => ({ ...s, chainLoop: !s.chainLoop }))}
+                                  className={`px-2 py-0.5 rounded border text-[10px] font-bold uppercase transition-colors
+                                    ${state.chainLoop
+                                      ? 'border-cyan-500 text-cyan-400 bg-cyan-500/10'
+                                      : 'border-slate-700 text-slate-500 hover:text-slate-300'}
+                                  `}
+                                  title="Chain Loop (explicit)"
+                                >
+                                  Loop
+                                </button>
+
+                                <button onClick={clearChain} className="text-slate-500 hover:text-white ml-1 border-l border-slate-700 pl-2"><RefreshCw size={10} /></button>
+                            </div>
+                        )}
+                    </div>
                  </div>
+
                  <div className="flex gap-1 h-full">
                     {Array.from({length: 8}).map((_, i) => {
                         const isActive = state.activePatternIdx === i;
@@ -463,7 +609,7 @@ export default function App() {
                         color="text-cyan-400"
                     />
                     <Knob 
-                        label="MicroTime" 
+                        label="Micro ms" 
                         value={selectedStep?.microTiming ?? 0} 
                         min={-50} max={50} 
                         onChange={(v) => updateSelectedStep({ microTiming: v })} 

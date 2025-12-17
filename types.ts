@@ -5,7 +5,7 @@ export interface StepData {
   note: number;      // MIDI Note 0-127
   velocity: number;  // 0-127
   gate: number;      // 1-100%
-  microTiming: number; // -50 to +50 (percent of step)
+  microTiming: number; // -50 to +50 (milliseconds offset) - declaring microtiming as a temporal primitive
   macroA: number;    // CC20 Value 0-127
   macroB: number;    // CC21 Value 0-127
 }
@@ -40,6 +40,7 @@ export interface SequencerState {
   // Chaining
   chain: number[]; // Array of pattern indices
   chainStep: number; // Current index in the chain array
+  chainLoop: boolean; // Explicit loop policy
 }
 
 export const SCALES: Record<ScaleType, number[]> = {
