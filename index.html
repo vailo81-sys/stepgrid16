@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="en">
   <head>
@@ -7,39 +6,87 @@
     <title>StepGrid16</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
-      /* Custom scrollbar for webkit */
-      ::-webkit-scrollbar {
-        width: 8px;
-        height: 8px;
+      @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap');
+      
+      :root {
+        /* StepGrid16 — Universal Contrast Tokens */
+        --bg:        #07090c;  /* base background */
+        --panel:     #131923;  /* main panels */
+        --panel2:    #182233;  /* secondary panels */
+        --cell:      #0b0f15;  /* grid cell base */
+        --cellHover: #101826;  /* hover/alt */
+        --sel:       #243246;  /* selected */
+        --play:      #2a3a52;  /* playing */
+
+        /* Structure */
+        --line:      #3b4a60;  /* borders/dividers */
+        --line2:     #506482;  /* stronger borders */
+
+        /* Text */
+        --text:      #f2f6fb;  /* main */
+        --muted:     #c7d2e3;  /* labels */
+        --dim:       #9aa9bf;  /* secondary */
+        --disabled:  #72829c;  /* disabled but readable */
+
+        /* Accent */
+        --accent:    #38f0f6;  /* selection/state */
+        --warn:      #ffcb5c;  /* microtime/warn */
+        --neg:       #ff5c93;  /* negative microtime */
       }
-      ::-webkit-scrollbar-track {
-        background: #1e293b; 
-      }
-      ::-webkit-scrollbar-thumb {
-        background: #475569; 
-        border-radius: 4px;
-      }
-      ::-webkit-scrollbar-thumb:hover {
-        background: #64748b; 
-      }
+
       body {
-        background-color: #0f172a;
-        color: #e2e8f0;
-        touch-action: manipulation;
+        background-color: var(--bg);
+        color: var(--text);
+        font-family: 'JetBrains Mono', monospace;
+        margin: 0;
+        overflow: hidden;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      /* Structural Reset */
+      * { 
+        box-shadow: none !important; 
+        border-radius: 0 !important;
+        text-transform: uppercase;
+      }
+
+      .sg-panel  { background: var(--panel);  border: 1px solid var(--line); }
+      .sg-panel2 { background: var(--panel2); border: 1px solid var(--line); }
+
+      .sg-cell   { background: var(--cell); border: 1px solid var(--line); }
+      .sg-cell:hover { background: var(--cellHover); border-color: var(--line2); }
+
+      .sg-selected { background: var(--sel); border: 2px solid var(--accent); }
+      .sg-playing  { background: var(--play); border: 2px solid var(--text); }
+
+      .sg-label { color: var(--muted); letter-spacing: .08em; font-weight: 700; font-size: 9px; }
+      .sg-dim { color: var(--dim); }
+      .sg-disabled { color: var(--disabled); }
+
+      .sg-value { color: var(--text); font-variant-numeric: tabular-nums; font-weight: 700; }
+
+      /* Hard scrollbars */
+      ::-webkit-scrollbar { width: 4px; height: 4px; }
+      ::-webkit-scrollbar-track { background: var(--bg); }
+      ::-webkit-scrollbar-thumb { background: var(--line); }
+
+      input[type="number"]::-webkit-inner-spin-button,
+      input[type="number"]::-webkit-outer-spin-button {
+        -webkit-appearance: none;
+        margin: 0;
       }
     </style>
-  <script type="importmap">
-{
-  "imports": {
-    "uuid": "https://aistudiocdn.com/uuid@^13.0.0",
-    "lucide-react": "https://aistudiocdn.com/lucide-react@^0.556.0",
-    "react/": "https://aistudiocdn.com/react@^19.2.1/",
-    "react": "https://aistudiocdn.com/react@^19.2.1",
-    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.1/"
-  }
-}
-</script>
-</head>
+    <script type="importmap">
+    {
+      "imports": {
+        "react": "https://esm.sh/react@^19.2.3",
+        "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
+        "react/": "https://esm.sh/react@^19.2.3/",
+        "lucide-react": "https://esm.sh/lucide-react@^0.561.0"
+      }
+    }
+    </script>
+  </head>
   <body>
     <div id="root"></div>
   </body>

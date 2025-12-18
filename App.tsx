@@ -1,6 +1,5 @@
-
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Play, Square, Settings, Music, Link as LinkIcon, RefreshCw, Layers, Download } from 'lucide-react';
+import { Play, Square, Settings, RefreshCw, Layers, Download } from 'lucide-react';
 import { 
   Pattern, StepData, SequencerState, ScaleType, SCALES 
 } from './types';
@@ -12,10 +11,7 @@ import { downloadMidi } from './services/midiExport';
 import PianoKeyboard from './components/PianoKeyboard';
 import Knob from './components/Knob';
 
-// Audio Context
 const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
-
-// --- Persistence Helpers ---
 const STORAGE_KEY = 'stepgrid16:v1';
 
 function safeParse<T>(raw: string | null): T | null {
@@ -28,7 +24,6 @@ function saveToDisk(payload: any) {
 }
 
 export default function App() {
-  // --- Data State ---
   const [patterns, setPatterns] = useState<Pattern[]>(INITIAL_PATTERNS);
   const [state, setState] = useState<SequencerState>({
     tempo: DEFAULT_TEMPO,
@@ -37,60 +32,46 @@ export default function App() {
     activePatternIdx: 0,
     midiChannel: 1,
     midiOutputId: null,
-    rootNote: 0, // C
+    rootNote: 0, 
     scaleType: ScaleType.MINOR,
     scaleFold: false,
     chain: [],
     chainStep: 0,
-    chainLoop: false, // Explicit loop policy
+    chainLoop: false,
   });
   
-  // --- UI State ---
   const [selectedStepIdx, setSelectedStepIdx] = useState<number | null>(null);
   const [midiOutputs, setMidiOutputs] = useState<{id: string, name: string}[]>([]);
 
-  // Refs for Audio Engine
   const stateRef = useRef(state);
   const patternsRef = useRef(patterns);
   const patternClipboardRef = useRef<Pattern | null>(null);
   
-  // Sync Refs
   useEffect(() => { stateRef.current = state; }, [state]);
   useEffect(() => { patternsRef.current = patterns; }, [patterns]);
 
-  // Init MIDI
   useEffect(() => {
     midiService.initialize().then(() => {
       setMidiOutputs(midiService.getOutputs());
     });
   }, []);
 
-  // --- MIDI Panic Logic ---
   const panic = useCallback((outputId?: string | null) => {
     const out = outputId !== undefined ? outputId : stateRef.current.midiOutputId;
     const ch = stateRef.current.midiChannel;
-    midiService.sendCC(out, ch, 120, 0); // All Sound Off
-    midiService.sendCC(out, ch, 121, 0); // Reset Controllers
-    midiService.sendCC(out, ch, 123, 0); // All Notes Off
+    midiService.sendCC(out, ch, 120, 0);
+    midiService.sendCC(out, ch, 121, 0);
+    midiService.sendCC(out, ch, 123, 0);
   }, []);
 
-  // --- Persistence Effects ---
   useEffect(() => {
     const data = safeParse<{ patterns?: Pattern[]; state?: Partial<SequencerState> }>(
       localStorage.getItem(STORAGE_KEY)
     );
     if (!data) return;
-
     if (data.patterns) setPatterns(data.patterns);
-
     if (data.state) {
-      setState(s => ({
-        ...s,
-        ...data.state,
-        isPlaying: false,
-        currentStep: -1,
-        chainStep: 0,
-      }));
+      setState(s => ({ ...s, ...data.state, isPlaying: false, currentStep: -1, chainStep: 0 }));
     }
   }, []);
 
@@ -111,11 +92,9 @@ export default function App() {
     });
   }, [patterns, state]);
 
-  // Safety: Panic on blur/visibility
   useEffect(() => {
     const onBlur = () => panic();
     const onVis = () => { if (document.hidden) panic(); };
-
     window.addEventListener('blur', onBlur);
     document.addEventListener('visibilitychange', onVis);
     return () => {
@@ -124,18 +103,11 @@ export default function App() {
     };
   }, [panic]);
 
-  // --- Pattern Operations ---
   const clearPattern = (idx: number) => {
     setPatterns(ps => {
       const next = [...ps];
       const p = next[idx];
-      next[idx] = {
-        ...p,
-        steps: p.steps.map(s => ({
-          ...s,
-          active: false,
-        })),
-      };
+      next[idx] = { ...p, steps: p.steps.map(s => ({ ...s, active: false })) };
       return next;
     });
     setSelectedStepIdx(null);
@@ -164,53 +136,16 @@ export default function App() {
     });
   };
 
-  // --- Engine Constants ---
   const nextNoteTime = useRef<number>(0.0);
   const currentStepRef = useRef<number>(0);
   const timerID = useRef<number | null>(null);
   const lookahead = 25.0; 
   const scheduleAheadTime = 0.1;
 
-  // --- Sequencing Engine ---
   const nextNote = useCallback(() => {
     const secondsPerBeat = 60.0 / stateRef.current.tempo;
     const sixteenthNoteTime = secondsPerBeat / 4; 
-    
     nextNoteTime.current += sixteenthNoteTime;
-    
-    const currentIdx = currentStepRef.current;
-    
-    // Pattern Advancement Logic
-    if (currentIdx === 15) {
-      const currentState = stateRef.current;
-
-      if (currentState.chain.length > 0) {
-        const nextChainStepRaw = currentState.chainStep + 1;
-
-        if (nextChainStepRaw >= currentState.chain.length) {
-          if (currentState.chainLoop) {
-            const nextChainStep = 0;
-            const nextPatternIdx = currentState.chain[0];
-            setState(s => ({ ...s, chainStep: nextChainStep, activePatternIdx: nextPatternIdx }));
-            stateRef.current.chainStep = nextChainStep;
-            stateRef.current.activePatternIdx = nextPatternIdx;
-          } else {
-            const lastStep = currentState.chain.length - 1;
-            const lastPatternIdx = currentState.chain[lastStep];
-            setState(s => ({ ...s, chainStep: lastStep, activePatternIdx: lastPatternIdx }));
-            stateRef.current.chainStep = lastStep;
-            stateRef.current.activePatternIdx = lastPatternIdx;
-          }
-        } else {
-          const nextChainStep = nextChainStepRaw;
-          const nextPatternIdx = currentState.chain[nextChainStep];
-          setState(s => ({ ...s, chainStep: nextChainStep, activePatternIdx: nextPatternIdx }));
-          stateRef.current.chainStep = nextChainStep;
-          stateRef.current.activePatternIdx = nextPatternIdx;
-        }
-      }
-    }
-
     currentStepRef.current = (currentStepRef.current + 1) % 16;
   }, []);
 
@@ -218,7 +153,6 @@ export default function App() {
     requestAnimationFrame(() => {
         setState(s => ({ ...s, currentStep: stepNumber }));
     });
-
     const patternIdx = stateRef.current.activePatternIdx;
     const pattern = patternsRef.current[patternIdx];
     const step = pattern.steps[stepNumber];
@@ -260,22 +194,16 @@ export default function App() {
     timerID.current = window.setTimeout(scheduler, lookahead);
   }, [nextNote, scheduleNote]);
 
-  // --- Actions ---
   const togglePlay = () => {
     if (audioCtx.state === 'suspended') audioCtx.resume();
-
     if (!state.isPlaying) {
         currentStepRef.current = 0;
         stateRef.current.chainStep = 0;
-        if (state.chain.length > 0) {
-            setState(s => ({...s, chainStep: 0, activePatternIdx: s.chain[0]}));
-            stateRef.current.activePatternIdx = state.chain[0];
-        }
         nextNoteTime.current = audioCtx.currentTime;
         setState(s => ({ ...s, isPlaying: true }));
         scheduler();
     } else {
-        panic(); // Stop all notes on sequence stop
+        panic();
         setState(s => ({ ...s, isPlaying: false, currentStep: -1 }));
         if (timerID.current) window.clearTimeout(timerID.current);
     }
@@ -301,10 +229,7 @@ export default function App() {
       if (selectedStepIdx === null) return;
       const pattern = patterns[state.activePatternIdx];
       const newSteps = [...pattern.steps];
-      newSteps[selectedStepIdx] = {
-          ...newSteps[selectedStepIdx],
-          ...updates
-      };
+      newSteps[selectedStepIdx] = { ...newSteps[selectedStepIdx], ...updates };
       const newPatterns = [...patterns];
       newPatterns[state.activePatternIdx] = { ...pattern, steps: newSteps };
       setPatterns(newPatterns);
@@ -322,130 +247,83 @@ export default function App() {
       setState(s => ({...s, chain: [], chainStep: 0, chainLoop: false}));
   };
 
-  // --- Render Helpers ---
   const currentPattern = patterns[state.activePatternIdx];
   const selectedStep = selectedStepIdx !== null ? currentPattern.steps[selectedStepIdx] : null;
 
   return (
-    <div className="h-screen bg-slate-950 text-slate-200 flex flex-col font-sans select-none overflow-hidden">
+    <div className="h-screen flex flex-col font-mono text-[11px] overflow-hidden select-none">
       
-      {/* --- HEADER --- */}
-      <header className="bg-slate-900 border-b border-slate-800 p-3 flex justify-between items-center shrink-0 h-16">
-        <div className="flex items-center gap-4">
-            <div className="flex items-center gap-2">
-                <div className="w-8 h-8 bg-cyan-500 rounded flex items-center justify-center text-slate-900 shadow-lg shadow-cyan-500/20">
-                    <Music size={20} />
-                </div>
-                <h1 className="text-xl font-bold tracking-tight text-white hidden md:block">StepGrid<span className="text-cyan-500">16</span></h1>
-            </div>
-            
-            <div className="h-8 w-px bg-slate-700 mx-2"></div>
+      {/* SYSTEM BAR */}
+      <header className="h-10 sg-panel border-x-0 border-t-0 flex items-center justify-between px-4">
+        <div className="flex items-center gap-6">
+          <div className="flex items-center gap-2">
+            <span className="font-bold text-[var(--text)] tracking-tighter">STEPGRID<span className="text-[var(--accent)]">16</span></span>
+            <span className="sg-dim font-bold tracking-widest text-[9px]">_V1.0_STABLE</span>
+          </div>
 
-            <div className="flex items-center gap-2">
-                <button 
-                    onClick={togglePlay}
-                    className={`w-10 h-10 rounded flex items-center justify-center transition-all
-                        ${state.isPlaying 
-                            ? 'bg-red-500/10 text-red-500 border border-red-500/50' 
-                            : 'bg-slate-800 text-cyan-500 hover:bg-slate-700'}`}
-                >
-                    {state.isPlaying ? <Square size={16} fill="currentColor"/> : <Play size={16} fill="currentColor" />}
-                </button>
-                <div className="flex flex-col items-center justify-center bg-slate-800 rounded px-2 h-10 border border-slate-700">
-                    <span className="text-[10px] text-slate-500 font-bold uppercase">Tempo</span>
-                    <input 
-                      type="number" 
-                      value={state.tempo}
-                      onChange={(e) => setState(s => ({...s, tempo: parseInt(e.target.value) || 120}))}
-                      className="w-12 bg-transparent text-center text-cyan-400 font-mono text-sm focus:outline-none"
-                    />
-                </div>
+          <div className="flex items-center gap-1">
+            <button 
+                onClick={togglePlay}
+                className={`h-6 px-3 border transition-none font-bold tracking-widest
+                    ${state.isPlaying ? 'bg-[var(--text)] text-[var(--bg)] border-[var(--text)]' : 'bg-[var(--panel2)] text-[var(--accent)] border-[var(--line)] hover:bg-[var(--play)]'}`}
+            >
+                {state.isPlaying ? <Square size={10} fill="currentColor"/> : <Play size={10} fill="currentColor" />}
+                <span className="ml-2">{state.isPlaying ? 'STOP_SIGNAL' : 'START_SIGNAL'}</span>
+            </button>
+            <div className="h-6 flex items-center border border-[var(--line)] bg-[var(--bg)] px-2 gap-2">
+              <span className="sg-label text-[9px]">TEMPO:</span>
+              <input 
+                type="number" 
+                value={state.tempo}
+                onChange={(e) => setState(s => ({...s, tempo: parseInt(e.target.value) || 120}))}
+                className="w-8 bg-transparent text-[var(--accent)] text-right focus:outline-none sg-value"
+              />
             </div>
+          </div>
         </div>
 
         <div className="flex items-center gap-4">
-            <button 
-                onClick={() => downloadMidi(patterns, state.chain, state.activePatternIdx, state.tempo)}
-                className="flex items-center gap-2 px-3 h-8 rounded hover:bg-slate-800 text-slate-500 hover:text-cyan-400 transition-colors group"
-                title="Export MIDI"
+          <div className="flex items-center gap-2 sg-dim">
+            <Settings size={12} />
+            <select 
+              className="bg-transparent focus:outline-none appearance-none cursor-pointer hover:text-[var(--text)] font-bold"
+              value={state.midiOutputId || ''}
+              onChange={(e) => {
+                const nextId = e.target.value || null;
+                setState(s => ({ ...s, midiOutputId: nextId }));
+              }}
             >
-                <Download size={18} />
-                <span className="text-[10px] font-bold uppercase tracking-wider hidden sm:inline group-hover:text-cyan-400">Export MIDI</span>
-            </button>
-            <div className="h-6 w-px bg-slate-800"></div>
-            <div className="flex items-center gap-2 bg-slate-800 p-1 rounded border border-slate-700">
-                 <Settings size={14} className="text-slate-500 ml-1" />
-                 <select 
-                   className="bg-transparent text-xs text-slate-300 focus:outline-none w-32"
-                   value={state.midiOutputId || ''}
-                   onChange={(e) => {
-                     const nextId = e.target.value || null;
-                     const prevId = stateRef.current.midiOutputId;
-                     if (prevId && prevId !== nextId) panic(prevId);
-                     setState(s => ({ ...s, midiOutputId: nextId }));
-                   }}
-                 >
-                   <option value="">No MIDI Output</option>
-                   {midiOutputs.map(o => (
-                       <option key={o.id} value={o.id}>{o.name}</option>
-                   ))}
-                 </select>
-            </div>
+              <option value="">DEVICE_NULL</option>
+              {midiOutputs.map(o => (
+                  <option key={o.id} value={o.id}>{o.name}</option>
+              ))}
+            </select>
+          </div>
+          <button 
+              onClick={() => downloadMidi(patterns, state.chain, state.activePatternIdx, state.tempo)}
+              className="h-6 px-3 border border-[var(--line)] hover:bg-[var(--panel2)] flex items-center gap-2 sg-label"
+          >
+              <Download size={12} />
+              <span>EXPORT</span>
+          </button>
         </div>
       </header>
 
-      {/* --- MAIN CONTENT --- */}
       <div className="flex-1 flex flex-col p-4 gap-4 overflow-hidden">
          
-         {/* TOP ROW: Patterns & Chain */}
-         <div className="flex flex-col md:flex-row gap-4 shrink-0 h-[80px]">
-             {/* Pattern Select */}
-             <div className="flex-1 bg-slate-900 rounded-xl border border-slate-800 p-3 flex flex-col justify-center relative">
-                 <div className="flex justify-between items-center mb-2">
-                    <div className="flex items-center gap-3">
-                        <span className="text-[10px] font-bold uppercase text-slate-500">Patterns (Shift+Click to Chain)</span>
-                        <div className="flex items-center gap-1">
-                            <button onClick={() => clearPattern(state.activePatternIdx)} className="px-2 py-1 text-[10px] font-bold uppercase rounded bg-slate-800 text-slate-400 hover:text-white transition-colors">
-                                Clear
-                            </button>
-                            <button onClick={() => copyPattern(state.activePatternIdx)} className="px-2 py-1 text-[10px] font-bold uppercase rounded bg-slate-800 text-slate-400 hover:text-white transition-colors">
-                                Copy
-                            </button>
-                            <button onClick={() => pastePattern(state.activePatternIdx)} className="px-2 py-1 text-[10px] font-bold uppercase rounded bg-slate-800 text-slate-400 hover:text-white transition-colors">
-                                Paste
-                            </button>
-                            <button onClick={() => duplicateToNext(state.activePatternIdx)} className="px-2 py-1 text-[10px] font-bold uppercase rounded bg-slate-800 text-slate-400 hover:text-white transition-colors">
-                                Dupe→
-                            </button>
-                        </div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                        {state.chain.length > 0 && (
-                            <div className="flex items-center gap-2 text-[10px] bg-slate-800 px-2 py-0.5 rounded-full border border-slate-700">
-                                <LinkIcon size={10} className="text-cyan-400"/>
-                                <span className="font-mono text-cyan-400 truncate max-w-[150px]">
-                                    {state.chain.map(i => i + 1).join('→')}
-                                </span>
-                                
-                                <button
-                                  onClick={() => setState(s => ({ ...s, chainLoop: !s.chainLoop }))}
-                                  className={`px-2 py-0.5 rounded border text-[10px] font-bold uppercase transition-colors
-                                    ${state.chainLoop
-                                      ? 'border-cyan-500 text-cyan-400 bg-cyan-500/10'
-                                      : 'border-slate-700 text-slate-500 hover:text-slate-300'}
-                                  `}
-                                  title="Chain Loop (explicit)"
-                                >
-                                  Loop
-                                </button>
-
-                                <button onClick={clearChain} className="text-slate-500 hover:text-white ml-1 border-l border-slate-700 pl-2"><RefreshCw size={10} /></button>
-                            </div>
-                        )}
+         {/* REGISTERS */}
+         <div className="h-16 flex gap-4">
+             <div className="flex-1 sg-panel p-2 flex flex-col justify-between">
+                 <div className="flex justify-between items-center sg-label mb-1">
+                    <span>PATTERN_REGISTERS</span>
+                    <div className="flex gap-2">
+                        <button onClick={() => clearPattern(state.activePatternIdx)} className="hover:text-[var(--text)]">CLR</button>
+                        <button onClick={() => copyPattern(state.activePatternIdx)} className="hover:text-[var(--text)]">CPY</button>
+                        <button onClick={() => pastePattern(state.activePatternIdx)} className="hover:text-[var(--text)]">PST</button>
+                        <button onClick={() => duplicateToNext(state.activePatternIdx)} className="hover:text-[var(--text)]">DUP</button>
                     </div>
                  </div>
-
-                 <div className="flex gap-1 h-full">
+                 <div className="flex gap-1 h-6">
                     {Array.from({length: 8}).map((_, i) => {
                         const isActive = state.activePatternIdx === i;
                         const isInChain = state.chain.includes(i);
@@ -453,130 +331,149 @@ export default function App() {
                           <button 
                             key={i}
                             onClick={(e) => handlePatternClick(i, e.shiftKey)}
-                            className={`flex-1 rounded text-sm font-bold transition-all relative group
+                            className={`flex-1 border text-[10px] font-bold transition-none
                                 ${isActive 
-                                    ? 'bg-cyan-500 text-slate-900 shadow-[0_0_10px_rgba(6,182,212,0.4)]' 
-                                    : 'bg-slate-800 text-slate-500 hover:bg-slate-700 hover:text-slate-300'}
-                                ${isInChain && !isActive ? 'border-b-2 border-cyan-500' : ''}
+                                    ? 'bg-[var(--text)] text-[var(--bg)] border-[var(--text)]' 
+                                    : 'bg-[var(--cell)] sg-dim border-[var(--line)]'}
+                                ${isInChain && !isActive ? 'border-b-[var(--accent)]' : ''}
                             `}
                           >
-                            {i + 1}
-                            {/* Chain Indicator Dot */}
-                            {isInChain && (
-                                <div className="absolute top-1 right-1 w-1.5 h-1.5 bg-cyan-400 rounded-full shadow-[0_0_5px_rgba(6,182,212,0.8)]" />
-                            )}
+                            P_{String(i + 1).padStart(2, '0')}
                           </button>
                         );
                     })}
                  </div>
              </div>
+
+             <div className="w-64 sg-panel p-2 flex flex-col justify-between">
+                <div className="flex justify-between items-center sg-label">
+                    <span>CHAIN_SEQUENCE</span>
+                    <button onClick={clearChain} className="hover:text-[var(--text)]"><RefreshCw size={8} /></button>
+                </div>
+                <div className="flex items-center gap-1.5 h-6 overflow-hidden border-t border-[var(--line)] mt-1 pt-1">
+                    {state.chain.length > 0 ? (
+                        <>
+                            <div className="flex-1 overflow-x-auto scrollbar-hide flex gap-1 items-center">
+                                {state.chain.map((idx, i) => (
+                                    <span key={i} className={`px-1 bg-[var(--bg)] border border-[var(--line)] font-bold sg-value ${state.chainStep === i && state.isPlaying ? 'text-[var(--accent)] border-[var(--accent)]' : 'sg-dim'}`}>
+                                        {idx + 1}
+                                    </span>
+                                ))}
+                            </div>
+                            <button
+                              onClick={() => setState(s => ({ ...s, chainLoop: !s.chainLoop }))}
+                              className={`h-full px-2 border text-[9px] font-bold ${state.chainLoop ? 'bg-[var(--text)] text-[var(--bg)] border-[var(--text)]' : 'bg-transparent sg-dim border-[var(--line)]'}`}
+                            >
+                              LOOP
+                            </button>
+                        </>
+                    ) : (
+                        <span className="sg-disabled italic font-bold tracking-tight">NULL_BUFFER</span>
+                    )}
+                </div>
+             </div>
          </div>
 
-         {/* MIDDLE: THE GRID */}
-         <div className="flex-1 bg-slate-900 rounded-xl border border-slate-800 p-4 shadow-2xl relative overflow-hidden flex flex-col justify-center">
-             <div className="grid grid-cols-8 gap-2 md:gap-4 h-full">
+         {/* EXECUTION GRID */}
+         <div className="flex-1 bg-[var(--bg)] border border-[var(--line)] relative flex flex-col">
+             <div className="grid grid-cols-8 grid-rows-2 h-full p-[1px] gap-[1px] bg-[var(--line)]">
                {currentPattern.steps.map((step, idx) => {
                  const isCurrent = state.currentStep === idx;
                  const isSelected = selectedStepIdx === idx;
                  const isActive = step.active;
                  
-                 // Velocity Opacity Calculation (0.3 to 1.0)
-                 const velocityOpacity = 0.3 + (step.velocity / 127) * 0.7;
-
                  return (
                    <button
                      key={step.id}
                      onClick={() => handleStepClick(idx)}
                      onContextMenu={(e) => handleStepRightClick(e, idx)}
                      className={`
-                        relative rounded-lg border transition-all duration-75 group flex flex-col items-center justify-between p-2
-                        ${isCurrent ? 'ring-2 ring-white z-10' : ''}
-                        ${isSelected ? 'border-cyan-400' : 'border-slate-700'}
-                        ${!isActive ? 'bg-slate-950 hover:bg-slate-900' : ''}
+                        relative flex flex-col justify-between p-2 transition-none
+                        ${isSelected ? 'sg-selected z-20' : isActive ? 'bg-[var(--panel)]' : 'bg-[var(--cell)]'}
+                        ${isCurrent && !isSelected ? 'outline outline-1 outline-[var(--text)] bg-[var(--play)] z-10' : ''}
+                        hover:bg-[var(--cellHover)]
                      `}
-                     style={{
-                        backgroundColor: isActive 
-                            ? `rgba(22, 78, 99, ${velocityOpacity})` // cyan-900 base
-                            : undefined,
-                        boxShadow: isActive 
-                            ? `inset 0 0 20px rgba(6,182,212,${velocityOpacity * 0.3})`
-                            : undefined
-                     }}
                    >
-                     {/* Step Number */}
-                     <div className={`text-[10px] font-mono self-start ${isActive || isSelected ? 'text-cyan-500' : 'text-slate-600'}`}>
-                         {idx + 1}
-                     </div>
-                     
-                     {/* Note Name */}
-                     {isActive && (
-                        <div className="text-lg font-bold text-cyan-400" style={{ opacity: velocityOpacity }}>
-                            {["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"][step.note % 12]}
-                        </div>
-                     )}
+                     {/* CALIBRATION MARKS (CROSSHAIRS) */}
+                     <div className={`absolute top-1/2 left-0 w-full h-[1px] ${isSelected ? 'bg-black/10' : 'bg-[var(--line)]/20'} pointer-events-none`} />
+                     <div className={`absolute top-0 left-1/2 w-[1px] h-full ${isSelected ? 'bg-black/10' : 'bg-[var(--line)]/20'} pointer-events-none`} />
 
-                     {/* Visual Indicators */}
-                     <div className="w-full flex gap-1 h-1 mt-auto">
-                        {isActive && <div className="bg-cyan-500 h-full rounded-full" style={{ width: `${step.gate}%`, opacity: velocityOpacity }} />}
-                        {isActive && step.microTiming !== 0 && (
-                            <div className={`w-1 h-full rounded-full ${step.microTiming > 0 ? 'bg-yellow-500' : 'bg-pink-500'} opacity-70`} />
-                        )}
+                     <div className="flex justify-between items-start w-full relative z-10">
+                        <span className={`text-[9px] font-bold ${isSelected ? 'text-[var(--bg)]' : isActive ? 'text-[var(--accent)]' : 'sg-disabled'}`}>
+                            [{String(idx + 1).padStart(2, '0')}]
+                        </span>
+                        {isActive && <div className={`w-3 h-3 ${isSelected ? 'bg-[var(--bg)]' : 'bg-[var(--accent)]'}`} />}
                      </div>
-                     
-                     {isSelected && (
-                         <div className="absolute top-1 right-1 w-2 h-2 bg-cyan-400 rounded-full animate-pulse" />
-                     )}
+
+                     <div className="flex flex-col items-center relative z-10">
+                        {isActive ? (
+                            <span className={`text-[24px] font-bold leading-none tracking-tighter sg-value ${isSelected ? 'text-[var(--bg)]' : 'text-[var(--text)]'}`}>
+                                {["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"][step.note % 12]}
+                            </span>
+                        ) : (
+                            <div className="w-8 h-[1px] bg-[var(--line)]" />
+                        )}
+                        {isActive && <span className={`text-[8px] mt-1 font-bold ${isSelected ? 'opacity-40 text-[var(--bg)]' : 'sg-dim'}`}>AMP_{step.velocity}</span>}
+                     </div>
+
+                     <div className={`w-full h-[6px] mt-1 relative z-10 ${isSelected ? 'bg-black/10' : 'bg-[var(--bg)]'}`}>
+                        {isActive && <div className={`absolute top-0 left-0 h-full ${isSelected ? 'bg-black' : 'bg-[var(--accent)]'}`} style={{ width: `${step.gate}%` }} />}
+                     </div>
                    </button>
                  );
                })}
              </div>
          </div>
 
-         {/* BOTTOM: COMMITMENT PANEL */}
-         <div className="shrink-0 h-[220px] bg-slate-900 rounded-xl border border-slate-800 p-4 flex gap-6 overflow-x-auto">
+         {/* CONSOLE */}
+         <div className="h-[180px] flex gap-4">
              
-             {/* Scale Controls */}
-             <div className="flex flex-col gap-2 min-w-[120px]">
-                 <label className="text-[10px] font-bold uppercase text-slate-500 flex items-center gap-1">
-                    <Layers size={10} /> Scale & Key
-                 </label>
-                 <div className="bg-slate-950 p-2 rounded border border-slate-700 flex flex-col gap-2 h-full">
-                     <select 
-                        value={state.rootNote}
-                        onChange={(e) => setState(s => ({...s, rootNote: parseInt(e.target.value)}))}
-                        className="bg-slate-800 text-xs p-1 rounded border border-slate-700 focus:outline-none focus:border-cyan-500"
+             {/* SCALE - REDUCED AUTHORITY */}
+             <div className="w-44 sg-panel p-3 flex flex-col gap-3">
+                 <span className="sg-label text-[9px]">SCALE_CONFIG</span>
+                 <div className="flex flex-col gap-2">
+                     <div className="flex items-center justify-between">
+                        <span className="text-[8px] sg-dim">ROOT</span>
+                        <select 
+                            value={state.rootNote}
+                            onChange={(e) => setState(s => ({...s, rootNote: parseInt(e.target.value)}))}
+                            className="bg-[var(--bg)] text-[9px] px-1 border border-[var(--line)] outline-none text-[var(--dim)] w-14 text-center font-bold appearance-none cursor-pointer"
+                        >
+                            {["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"].map((n, i) => (
+                                <option key={n} value={i}>{n}</option>
+                            ))}
+                        </select>
+                     </div>
+                     <div className="flex flex-col gap-1">
+                        <span className="text-[8px] sg-dim">INTERVALS</span>
+                        <select 
+                            value={state.scaleType}
+                            onChange={(e) => setState(s => ({...s, scaleType: e.target.value as ScaleType}))}
+                            className="bg-[var(--bg)] text-[9px] p-1 border border-[var(--line)] outline-none text-[var(--dim)] font-bold cursor-pointer"
+                        >
+                            {Object.values(ScaleType).map(t => (
+                                <option key={t} value={t}>{t}</option>
+                            ))}
+                        </select>
+                     </div>
+                     <button 
+                        onClick={() => setState(s => ({...s, scaleFold: !s.scaleFold}))}
+                        className={`mt-1 h-6 border text-[9px] font-bold transition-none ${state.scaleFold ? 'bg-[var(--panel2)] text-[var(--accent)] border-[var(--accent)]' : 'bg-[var(--bg)] sg-disabled border-[var(--line)]'}`}
                      >
-                        {["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"].map((n, i) => (
-                            <option key={n} value={i}>{n}</option>
-                        ))}
-                     </select>
-                     <select 
-                        value={state.scaleType}
-                        onChange={(e) => setState(s => ({...s, scaleType: e.target.value as ScaleType}))}
-                        className="bg-slate-800 text-xs p-1 rounded border border-slate-700 focus:outline-none focus:border-cyan-500"
-                     >
-                        {Object.values(ScaleType).map(t => (
-                            <option key={t} value={t}>{t}</option>
-                        ))}
-                     </select>
-                     <label className="flex items-center gap-2 mt-auto cursor-pointer group">
-                        <div className={`w-3 h-3 border border-slate-600 rounded-sm flex items-center justify-center ${state.scaleFold ? 'bg-cyan-500 border-cyan-500' : 'bg-slate-900'}`}>
-                            {state.scaleFold && <div className="w-2 h-2 bg-white rounded-[1px]" />}
-                        </div>
-                        <span className={`text-[10px] font-bold uppercase ${state.scaleFold ? 'text-cyan-400' : 'text-slate-500'} group-hover:text-slate-300`}>Fold Keys</span>
-                        <input type="checkbox" className="hidden" checked={state.scaleFold} onChange={(e) => setState(s => ({...s, scaleFold: e.target.checked}))} />
-                     </label>
+                        FOLD: {state.scaleFold ? 'ON' : 'OFF'}
+                     </button>
                  </div>
              </div>
 
-             {/* Piano */}
-             <div className="flex-1 flex flex-col gap-2 min-w-[300px]">
-                <div className="flex justify-between items-end">
-                    <label className="text-[10px] font-bold uppercase text-slate-500">Note Input</label>
+             {/* TERMINAL - ENTRY ONLY */}
+             <div className="flex-1 sg-panel p-3 flex flex-col gap-2">
+                <div className="flex justify-between items-center sg-label">
+                    <span>ENTRY_TERMINAL</span>
                     {selectedStep && (
-                        <span className="text-xs font-mono text-cyan-400">
-                             {["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"][selectedStep.note % 12]}{Math.floor(selectedStep.note/12)-1}
-                        </span>
+                        <div className="flex gap-4 items-center">
+                            <span className="text-[var(--accent)] font-bold opacity-50">0x{selectedStep.note.toString(16).toUpperCase()}</span>
+                            <span className="text-[var(--text)] font-bold sg-value">{["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"][selectedStep.note % 12]}{Math.floor(selectedStep.note/12)-1}</span>
+                        </div>
                     )}
                 </div>
                 <div className="flex-1">
@@ -590,47 +487,26 @@ export default function App() {
                 </div>
              </div>
 
-             {/* Parameters */}
-             <div className="flex flex-col gap-2 min-w-[340px]">
-                 <label className="text-[10px] font-bold uppercase text-slate-500">Step Parameters {selectedStepIdx === null && "(Select Step)"}</label>
-                 <div className={`bg-slate-950 rounded border border-slate-700 h-full flex items-center justify-around px-2 ${selectedStepIdx === null ? 'opacity-30 pointer-events-none grayscale' : ''}`}>
-                    <Knob 
-                        label="Velocity" 
-                        value={selectedStep?.velocity ?? 100} 
-                        min={0} max={127} 
-                        onChange={(v) => updateSelectedStep({ velocity: v })} 
-                        color="text-green-400"
-                    />
-                    <Knob 
-                        label="Gate %" 
-                        value={selectedStep?.gate ?? 50} 
-                        min={1} max={100} 
-                        onChange={(v) => updateSelectedStep({ gate: v })} 
-                        color="text-cyan-400"
-                    />
-                    <Knob 
-                        label="Micro ms" 
-                        value={selectedStep?.microTiming ?? 0} 
-                        min={-50} max={50} 
-                        onChange={(v) => updateSelectedStep({ microTiming: v })} 
-                        color="text-yellow-400"
-                    />
-                    <div className="w-px h-12 bg-slate-800 mx-2"></div>
-                    <Knob 
-                        label="Macro A" 
-                        value={selectedStep?.macroA ?? 64} 
-                        min={0} max={127} 
-                        onChange={(v) => updateSelectedStep({ macroA: v })} 
-                        color="text-fuchsia-400"
-                    />
-                    <Knob 
-                        label="Macro B" 
-                        value={selectedStep?.macroB ?? 64} 
-                        min={0} max={127} 
-                        onChange={(v) => updateSelectedStep({ macroB: v })} 
-                        color="text-purple-400"
-                    />
+             {/* CALIBRATION - DOMINANT PANEL */}
+             <div className="w-[480px] sg-panel p-3 flex flex-col gap-2 relative">
+                 <span className="sg-label">TOLERANCE_CALIBRATION</span>
+                 <div className={`flex-1 grid grid-cols-3 gap-2 ${selectedStepIdx === null ? 'opacity-5 pointer-events-none' : ''}`}>
+                    <Knob label="VELOCITY" value={selectedStep?.velocity ?? 100} min={0} max={127} onChange={(v) => updateSelectedStep({ velocity: v })} />
+                    <Knob label="GATE_LEN" value={selectedStep?.gate ?? 50} min={1} max={100} onChange={(v) => updateSelectedStep({ gate: v })} />
+                    <Knob label="OFS_MS" value={selectedStep?.microTiming ?? 0} min={-50} max={50} onChange={(v) => updateSelectedStep({ microTiming: v })} />
+                    <Knob label="MOD_01" value={selectedStep?.macroA ?? 64} min={0} max={127} onChange={(v) => updateSelectedStep({ macroA: v })} />
+                    <Knob label="MOD_02" value={selectedStep?.macroB ?? 64} min={0} max={127} onChange={(v) => updateSelectedStep({ macroB: v })} />
+                    <div className="flex flex-col items-center justify-center border border-[var(--line)] bg-[var(--bg)] p-1">
+                        <span className="text-[7px] sg-disabled font-bold tracking-[0.5em] leading-none mb-1">REGISTER</span>
+                        <div className="w-6 h-[1px] bg-[var(--line)]/20" />
+                        <span className="text-[7px] sg-disabled font-bold tracking-[0.5em] leading-none mt-1">LOCKED</span>
+                    </div>
                  </div>
+                 {selectedStepIdx === null && (
+                     <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                         <span className="sg-disabled font-bold text-[16px] tracking-[2.5em]">BUFFER_IDLE</span>
+                     </div>
+                 )}
              </div>
 
          </div>

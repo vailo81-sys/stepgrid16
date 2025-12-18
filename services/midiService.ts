@@ -1,6 +1,7 @@
 export class MidiService {
   private midiAccess: MIDIAccess | null = null;
   private outputs: MIDIOutput[] = [];
+  private warnedNoOutputs = false;
   
   async initialize(): Promise<void> {
     if (!(navigator as any).requestMIDIAccess) {
@@ -21,6 +22,9 @@ export class MidiService {
   private updateOutputs() {
     if (!this.midiAccess) return;
     this.outputs = Array.from(this.midiAccess.outputs.values());
+    if (this.outputs.length > 0) {
+      this.warnedNoOutputs = false;
+    }
   }
 
   getOutputs(): { id: string; name: string }[] {
@@ -30,8 +34,6 @@ export class MidiService {
   sendNoteOn(outputId: string | null, channel: number, note: number, velocity: number) {
     const output = this.getOutput(outputId);
     if (!output) return;
-    // MIDI Command: 0x90 (Note On) + Channel (0-15)
-    // Note: MIDI channels are 1-indexed in UI, 0-indexed in protocol
     const status = 0x90 + (channel - 1);
     output.send([status, note, velocity]);
   }
@@ -51,7 +53,14 @@ export class MidiService {
   }
 
   private getOutput(id: string | null): MIDIOutput | undefined {
-    if (!id || !this.outputs.length) return this.outputs[0]; // Default to first if none specified
+    if (!this.outputs.length) {
+      if (!this.warnedNoOutputs) {
+        console.warn('No MIDI outputs available.');
+        this.warnedNoOutputs = true;
+      }
+      return undefined;
+    }
+    if (!id) return this.outputs[0]; 
     return this.outputs.find(o => o.id === id);
   }
 }
