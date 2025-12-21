@@ -65,8 +65,8 @@ export const downloadMidi = (patterns: Pattern[], chain: number[], activePattern
         const noteOnTick = Math.max(0, stepStartTick + offsetTicks);
         
         // Calculate Duration
-        // gate 1-100% of a sixteenth note
-        const duration = Math.round((step.gate / 100) * ticksPerSixteenth);
+        // FIXED: gate 1-16 (number of steps)
+        const duration = Math.round(step.gate * ticksPerSixteenth);
         
         // derive noteOffTick from the clamped noteOnTick to preserve deterministic gate length
         const noteOffTick = noteOnTick + duration;
@@ -110,7 +110,6 @@ export const downloadMidi = (patterns: Pattern[], chain: number[], activePattern
   
   // 1. Set Tempo Event at tick 0
   // FF 51 03 tttttt
-  // Microseconds per quarter note = 60,000,000 / tempo
   const mpqn = Math.round(60000000 / tempo);
   trackBytes.push(0); // Delta 0
   trackBytes.push(0xFF, 0x51, 0x03, ...numToBytes(mpqn, 3));

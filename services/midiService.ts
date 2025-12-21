@@ -1,7 +1,9 @@
+
 export class MidiService {
   private midiAccess: MIDIAccess | null = null;
   private outputs: MIDIOutput[] = [];
   private warnedNoOutputs = false;
+  private listeners: (() => void)[] = [];
   
   async initialize(): Promise<void> {
     if (!(navigator as any).requestMIDIAccess) {
@@ -25,6 +27,19 @@ export class MidiService {
     if (this.outputs.length > 0) {
       this.warnedNoOutputs = false;
     }
+    this.notifyListeners();
+  }
+
+  addListener(cb: () => void) {
+    this.listeners.push(cb);
+  }
+
+  removeListener(cb: () => void) {
+    this.listeners = this.listeners.filter(l => l !== cb);
+  }
+
+  private notifyListeners() {
+    this.listeners.forEach(l => l());
   }
 
   getOutputs(): { id: string; name: string }[] {
@@ -50,6 +65,14 @@ export class MidiService {
     if (!output) return;
     const status = 0xB0 + (channel - 1);
     output.send([status, cc, value]);
+  }
+
+  sendAllNotesOff(outputId: string | null, channel: number) {
+    const output = this.getOutput(outputId);
+    if (!output) return;
+    const status = 0xB0 + (channel - 1);
+    output.send([status, 123, 0]); // All Notes Off
+    output.send([status, 120, 0]); // All Sound Off
   }
 
   private getOutput(id: string | null): MIDIOutput | undefined {
