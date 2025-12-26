@@ -1,13 +1,19 @@
 
-export interface StepData {
-  id: string;
-  active: boolean;
-  note: number;      // MIDI Note 0-127
+export interface NoteData {
+  pitch: number;      // MIDI Note 0-127
   velocity: number;  // 0-127
-  gate: number;      // 1-16 (Number of 16th steps)
+  gate: number;      // 1-16 (Standard) or Sub-step resolution
   microTiming: number; // -50 to +50 (milliseconds offset)
   macroA: number;    // CC Value 0-127
   macroB: number;    // CC Value 0-127
+}
+
+export interface StepData {
+  id: string;
+  active: boolean;
+  notes: NoteData[];  // Polyphonic stack
+  swing: number;      // 0-100% (Numeric per step)
+  accent: boolean;    // Velocity boost
 }
 
 export interface Pattern {
@@ -35,7 +41,6 @@ export enum ScaleType {
   DIMINISHED_WH = 'Diminished (W-H)',
 }
 
-// Fix: Define missing EditMode enum to resolve import errors in other components.
 export enum EditMode {
   NOTE = 'NOTE',
   VELOCITY = 'VELOCITY',
@@ -43,6 +48,7 @@ export enum EditMode {
   OFFSET = 'OFFSET',
   MACRO_A = 'MACRO_A',
   MACRO_B = 'MACRO_B',
+  SWING = 'SWING'
 }
 
 export interface SequencerState {
@@ -57,12 +63,16 @@ export interface SequencerState {
   scaleType: ScaleType;
   scaleFold: boolean;
   // Chaining
-  chain: number[]; // Array of pattern indices
-  chainStep: number; // Current index in the chain array
-  chainLoop: boolean; // Explicit loop policy
+  chain: number[]; 
+  chainStep: number; 
+  chainLoop: boolean; 
   // Macro CCs
   macroCC_A: number; 
   macroCC_B: number;
+  // Lane-level AR
+  attackMs: number;
+  releaseMs: number;
+  superGate: boolean;
 }
 
 export const SCALES: Record<ScaleType, number[]> = {

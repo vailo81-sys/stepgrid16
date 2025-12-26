@@ -1,9 +1,6 @@
 
 import { Pattern } from '../types';
 
-// Simple MIDI Encoder
-// Standard MIDI File Format (SMF) Type 0 (Single Track)
-// PPQ = 480 (High resolution ticks per quarter note)
 const PPQ = 480; 
 
 function strToBytes(str: string): number[] {
@@ -39,121 +36,61 @@ interface MidiEvent {
 }
 
 export const downloadMidi = (patterns: Pattern[], chain: number[], activePatternIdx: number, tempo: number) => {
-  // Determine sequence: Chain or Single Pattern
   const sequencePatterns: Pattern[] = [];
-  if (chain.length > 0) {
-    chain.forEach(idx => sequencePatterns.push(patterns[idx]));
-  } else {
-    sequencePatterns.push(patterns[activePatternIdx]);
-  }
+  if (chain.length > 0) chain.forEach(idx => sequencePatterns.push(patterns[idx]));
+  else sequencePatterns.push(patterns[activePatternIdx]);
 
   const events: MidiEvent[] = [];
   let currentTick = 0;
-  const ticksPerSixteenth = PPQ / 4; // 120 ticks
+  const ticksPerSixteenth = PPQ / 4; 
 
   sequencePatterns.forEach(pattern => {
-    pattern.steps.forEach((step) => {
-      // Base start time of this step slot
+    pattern.steps.forEach((step, stepIdx) => {
       const stepStartTick = currentTick;
       
       if (step.active) {
-        // Microtiming (milliseconds) -> ticks
-        // Law: ticks = (ms / 1000) * (tempo * PPQ / 60)
-        const offsetTicks = Math.round((step.microTiming / 1000) * (tempo * PPQ / 60));
-        
-        // Clamp noteOnTick once to ensure we don't start before 0
-        const noteOnTick = Math.max(0, stepStartTick + offsetTicks);
-        
-        // Calculate Duration
-        // FIXED: gate 1-16 (number of steps)
-        const duration = Math.round(step.gate * ticksPerSixteenth);
-        
-        // derive noteOffTick from the clamped noteOnTick to preserve deterministic gate length
-        const noteOffTick = noteOnTick + duration;
+        step.notes.forEach(note => {
+          const swingOffsetMs = (stepIdx % 2 === 1) ? ((60.0 / tempo / 4) * 1000 * (step.swing / 100) * 0.5) : 0;
+          const msToTicks = (tempo * PPQ / 60000);
+          const offsetTicks = Math.round((note.microTiming + swingOffsetMs) * msToTicks);
+          const noteOnTick = Math.max(0, stepStartTick + offsetTicks);
+          const duration = Math.round(note.gate * ticksPerSixteenth);
+          const velocity = step.accent ? Math.min(127, note.velocity * 1.5) : note.velocity;
 
-        // CC Macros (20 & 21)
-        // CC events are placed at the same tick as note-on (after offset) to maintain phase-alignment
-        events.push({
-            tick: noteOnTick,
-            data: [0xB0, 20, step.macroA]
-        });
-        events.push({
-            tick: noteOnTick,
-            data: [0xB0, 21, step.macroB]
-        });
-
-        // Note On
-        events.push({
-          tick: noteOnTick,
-          data: [0x90, step.note, step.velocity]
-        });
-
-        // Note Off
-        events.push({
-          tick: noteOffTick,
-          data: [0x80, step.note, 0]
+          events.push({ tick: noteOnTick, data: [0xB0, 20, note.macroA] });
+          events.push({ tick: noteOnTick, data: [0xB0, 21, note.macroB] });
+          events.push({ tick: noteOnTick, data: [0x90, note.pitch, velocity] });
+          events.push({ tick: noteOnTick + duration, data: [0x80, note.pitch, 0] });
         });
       }
-
       currentTick += ticksPerSixteenth;
     });
   });
 
-  // End of Track buffer (1 beat)
-  const endTick = Math.max(currentTick, ...events.map(e => e.tick)) + PPQ;
-
-  // Sort events by tick
+  const endTick = currentTick + PPQ;
   events.sort((a, b) => a.tick - b.tick);
 
-  // Generate Track Data
   const trackBytes: number[] = [];
-  
-  // 1. Set Tempo Event at tick 0
-  // FF 51 03 tttttt
   const mpqn = Math.round(60000000 / tempo);
-  trackBytes.push(0); // Delta 0
-  trackBytes.push(0xFF, 0x51, 0x03, ...numToBytes(mpqn, 3));
+  trackBytes.push(0, 0xFF, 0x51, 0x03, ...numToBytes(mpqn, 3));
 
-  // 2. Events
   let lastTick = 0;
   events.forEach(e => {
-    const delta = Math.max(0, e.tick - lastTick); // Ensure no negative delta
-    trackBytes.push(...toVLQ(delta));
-    trackBytes.push(...e.data);
+    const delta = Math.max(0, e.tick - lastTick);
+    trackBytes.push(...toVLQ(delta), ...e.data);
     lastTick = e.tick;
   });
+  trackBytes.push(...toVLQ(endTick - lastTick), 0xFF, 0x2F, 0x00);
 
-  // 3. End of Track
-  const deltaEnd = endTick - lastTick;
-  trackBytes.push(...toVLQ(deltaEnd));
-  trackBytes.push(0xFF, 0x2F, 0x00);
-
-  // Build Header Chunk
-  const headerBytes = [
-    ...strToBytes('MThd'),
-    ...numToBytes(6, 4), // Header length
-    ...numToBytes(0, 2), // Format 0 (Single Track)
-    ...numToBytes(1, 2), // 1 Track
-    ...numToBytes(PPQ, 2) // Division
-  ];
-
-  // Build Track Chunk Header
-  const trackChunkHeader = [
-    ...strToBytes('MTrk'),
-    ...numToBytes(trackBytes.length, 4)
-  ];
-
-  // Combine
+  const headerBytes = [...strToBytes('MThd'), ...numToBytes(6, 4), ...numToBytes(0, 2), ...numToBytes(1, 2), ...numToBytes(PPQ, 2)];
+  const trackChunkHeader = [...strToBytes('MTrk'), ...numToBytes(trackBytes.length, 4)];
   const fileBytes = new Uint8Array([...headerBytes, ...trackChunkHeader, ...trackBytes]);
   
-  // Create Download
   const blob = new Blob([fileBytes], { type: 'audio/midi' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `stepgrid16_${new Date().toISOString().slice(0,10)}.mid`;
-  document.body.appendChild(a);
+  a.download = `stepgrid16_poly.mid`;
   a.click();
-  document.body.removeChild(a);
   URL.revokeObjectURL(url);
 };
