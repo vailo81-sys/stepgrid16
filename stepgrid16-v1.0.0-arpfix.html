@@ -1,0 +1,2309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <title>StepGrid16 v1.0.0</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap');
+    
+    :root {
+      --bg:        #07090c;
+      --panel:     #131923;
+      --panel2:    #182233;
+      --cell:      #0b0f15;
+      --cellHover: #101826;
+      --sel:       #243246;
+      --play:      #2a3a52;
+      --line:      #3b4a60;
+      --line2:     #506482;
+      --text:      #f2f6fb;
+      --muted:     #c7d2e3;
+      --dim:       #9aa9bf;
+      --disabled:  #72829c;
+      --accent:    #38f0f6;
+      --warn:      #ffcb5c;
+      --neg:       #ff5c93;
+    }
+
+    html, body, #root {
+      height: 100%;
+      width: 100%;
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background-color: var(--bg);
+    }
+    
+    body {
+      color: var(--text);
+      font-family: 'JetBrains Mono', monospace;
+      -webkit-font-smoothing: antialiased;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    * { 
+      box-shadow: none !important; 
+      border-radius: 0 !important;
+      text-transform: uppercase;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    .sg-panel  { background: var(--panel);  border: 1px solid var(--line); }
+    .sg-panel2 { background: var(--panel2); border: 1px solid var(--line); }
+    .sg-label { color: var(--muted); letter-spacing: .08em; font-weight: 700; font-size: 9px; }
+    .sg-dim { color: var(--dim); }
+    .sg-disabled { color: var(--disabled); }
+    .sg-value { color: var(--text); font-variant-numeric: tabular-nums; font-weight: 700; }
+
+    ::-webkit-scrollbar { width: 4px; height: 4px; }
+    ::-webkit-scrollbar-track { background: var(--bg); }
+    ::-webkit-scrollbar-thumb { background: var(--line); }
+
+    input[type="number"]::-webkit-inner-spin-button,
+    input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+    
+    .no-scrollbar::-webkit-scrollbar { display: none; }
+    .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+    
+    #scale-container {
+      position: fixed;
+      left: 50%;
+      top: 50%;
+      transform-origin: center center;
+    }
+    .scale-warning { position: fixed; bottom: 4px; left: 50%; transform: translateX(-50%); background: var(--warn); color: var(--bg); padding: 2px 8px; font-size: 8px; font-weight: bold; z-index: 1000; opacity: 0.9; }
+
+    /* P1-5 FIX: Select dropdown styling for dark theme readability */
+    select {
+      background-color: var(--bg);
+      color: var(--text);
+    }
+    select option {
+      background-color: var(--panel);
+      color: var(--text);
+      padding: 4px 8px;
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  
+  <script type="text/babel">
+    // Seeded PRNG (mulberry32) - deterministic, no Math.random() for musical random
+    function mulberry32(seed) {
+      return function() {
+        let t = seed += 0x6D2B79F5;
+        t = Math.imul(t ^ t >>> 15, t | 1);
+        t ^= t + Math.imul(t ^ t >>> 7, t | 61);
+        return ((t ^ t >>> 14) >>> 0) / 4294967296;
+      };
+    }
+
+    const { useState, useEffect, useRef, useCallback, useMemo } = React;
+
+    // ============================================================================
+    // PHASE 1: DATA MODEL (A1, A2, A3, G1)
+    // ============================================================================
+
+    // A2: Canonical NoteID type
+    // NoteID space: 0-127 = Pitch (standard MIDI), 128-143 = Drum
+    // This is the SINGLE SOURCE OF TRUTH for note identity
+    
+    const DRUM_IDS = Object.freeze({
+      KIK: 128, SNR: 129, CHH: 130, OHH: 131,
+      CLP: 132, RIM: 133, LT: 134, MT: 135,
+      HT: 136, CYM: 137, RS: 138, CB: 139,
+      MA: 140, CL: 141, AG: 142, BG: 143
+    });
+
+    const DRUM_NAMES = Object.freeze(
+      Object.fromEntries(Object.entries(DRUM_IDS).map(([k, v]) => [v, k]))
+    );
+
+    // Mapping from pad index (0-15) to drum NoteID
+    const DRUM_PAD_MAP = Object.freeze([
+      DRUM_IDS.KIK, DRUM_IDS.SNR, DRUM_IDS.CHH, DRUM_IDS.OHH,
+      DRUM_IDS.CLP, DRUM_IDS.RIM, DRUM_IDS.LT, DRUM_IDS.MT,
+      DRUM_IDS.HT, DRUM_IDS.CYM, DRUM_IDS.RS, DRUM_IDS.CB,
+      DRUM_IDS.MA, DRUM_IDS.CL, DRUM_IDS.AG, DRUM_IDS.BG
+    ]);
+
+    // Mapping from drum NoteID to MIDI pitch for output
+    const DRUM_MIDI_MAP = Object.freeze({
+      [DRUM_IDS.KIK]: 36, [DRUM_IDS.SNR]: 38, [DRUM_IDS.CHH]: 42, [DRUM_IDS.OHH]: 46,
+      [DRUM_IDS.CLP]: 39, [DRUM_IDS.RIM]: 37, [DRUM_IDS.LT]: 41, [DRUM_IDS.MT]: 45,
+      [DRUM_IDS.HT]: 48, [DRUM_IDS.CYM]: 49, [DRUM_IDS.RS]: 51, [DRUM_IDS.CB]: 56,
+      [DRUM_IDS.MA]: 70, [DRUM_IDS.CL]: 75, [DRUM_IDS.AG]: 67, [DRUM_IDS.BG]: 68
+    });
+
+    // Pure identity functions - NO MODE FLAGS, NO CONTEXT
+    const isDrum = (noteId) => noteId >= 128 && noteId <= 143;
+    const isPitch = (noteId) => noteId >= 0 && noteId <= 127;
+
+    // A2: getNoteLabel is pure function of NoteID only
+    const getNoteLabel = (noteId) => {
+      if (isDrum(noteId)) return DRUM_NAMES[noteId] || '???';
+      if (!isPitch(noteId)) return '???';
+      const names = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
+      return `${names[noteId % 12]}${Math.floor(noteId / 12) - 1}`;
+    };
+
+    // Get MIDI pitch for output (drums map to their MIDI values, pitched notes are identity)
+    const getMidiPitch = (noteId) => {
+      if (isDrum(noteId)) return DRUM_MIDI_MAP[noteId] || 36;
+      return noteId;
+    };
+
+    // ============================================================================
+    // CONSTANTS
+    // ============================================================================
+
+    const CANONICAL_WIDTH = 960;
+    const CANONICAL_HEIGHT = 720;
+    const MIN_SCALE = 0.4;
+
+    const ScaleType = {
+      MAJOR: 'Major', NATURAL_MINOR: 'Natural Minor', HARMONIC_MINOR: 'Harmonic Minor',
+      MELODIC_MINOR: 'Melodic Minor', DORIAN: 'Dorian', PHRYGIAN: 'Phrygian',
+      LYDIAN: 'Lydian', MIXOLYDIAN: 'Mixolydian', LOCRIAN: 'Locrian',
+      MAJOR_PENTATONIC: 'Major Pentatonic', MINOR_PENTATONIC: 'Minor Pentatonic',
+      BLUES: 'Blues', WHOLE_TONE: 'Whole Tone',
+      DIMINISHED_HW: 'Diminished (H-W)', DIMINISHED_WH: 'Diminished (W-H)',
+    };
+
+    const SCALES = {
+      [ScaleType.MAJOR]: [0, 2, 4, 5, 7, 9, 11],
+      [ScaleType.NATURAL_MINOR]: [0, 2, 3, 5, 7, 8, 10],
+      [ScaleType.HARMONIC_MINOR]: [0, 2, 3, 5, 7, 8, 11],
+      [ScaleType.MELODIC_MINOR]: [0, 2, 3, 5, 7, 9, 11],
+      [ScaleType.DORIAN]: [0, 2, 3, 5, 7, 9, 10],
+      [ScaleType.PHRYGIAN]: [0, 1, 3, 5, 7, 8, 10],
+      [ScaleType.LYDIAN]: [0, 2, 4, 6, 7, 9, 11],
+      [ScaleType.MIXOLYDIAN]: [0, 2, 4, 5, 7, 9, 10],
+      [ScaleType.LOCRIAN]: [0, 1, 3, 5, 6, 8, 10],
+      [ScaleType.MAJOR_PENTATONIC]: [0, 2, 4, 7, 9],
+      [ScaleType.MINOR_PENTATONIC]: [0, 3, 5, 7, 10],
+      [ScaleType.BLUES]: [0, 3, 5, 6, 7, 10],
+      [ScaleType.WHOLE_TONE]: [0, 2, 4, 6, 8, 10],
+      [ScaleType.DIMINISHED_HW]: [0, 1, 3, 4, 6, 7, 9, 10],
+      [ScaleType.DIMINISHED_WH]: [0, 2, 3, 5, 6, 8, 9, 11],
+    };
+
+    const EditMode = { NOTE: 'NOTE', VELOCITY: 'VELOCITY', GATE: 'GATE', OFFSET: 'OFFSET', MACRO_A: 'MACRO_A', MACRO_B: 'MACRO_B', SWING: 'SWING' };
+    const InputFlow = { STEP_FIRST: 'STEP_FIRST', NOTE_FIRST: 'NOTE_FIRST' };
+
+    const DEFAULT_TEMPO = 120;
+    const TOTAL_STEPS = 16;
+    const PATTERN_COUNT = 8;
+    const BASE_OCTAVE = 3;
+
+    const VELOCITY_PRESETS = [8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 127];
+    const OFFSET_PRESETS = [-30, -25, -20, -15, -10, -5, -2, 0, 2, 5, 10, 15, 20, 25, 30, 40];
+    const MACRO_PRESETS = [0, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 127];
+    const SWING_PRESETS = [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 70, 80, 100];
+    // v068: GATE_PRESETS removed - now using Circuit-style step-span selector (1-16 pads)
+    const RATCHET_VALUES = [1, 2, 3, 4, 6, 8];
+
+    const generateId = () => Math.random().toString(36).substr(2, 9);
+
+    // A1, A3: Note structure - NO VOICE
+    // v068: gate is now step-span (1.0-16.0) not fraction
+    const createEmptyNote = (noteId = 60) => ({
+      id: noteId,           // NoteID: 0-127 = pitch, 128-143 = drum
+      velocity: 100,
+      gateSteps: 1.0,       // step-span: 1.0-16.0 (supports .5 increments)
+      microTiming: 0,
+      macroA: 64,
+      macroB: 64,
+      // NO voice property - identity is derived from noteId
+    });
+
+    const createEmptyStep = () => ({
+      id: generateId(),
+      active: false,
+      notes: [],
+      swing: 0,
+      accent: false,
+      ratchet: 1,
+      ratchetDecay: false,
+      // v068 FIX #4: Strum is per-step, not global
+      strumAmountPct: 0,    // 0-100 in 5% steps
+      strumDirection: 'DOWN', // DOWN, UP, BOUNCE
+    });
+
+    const createEmptyPattern = (index) => ({
+      id: index,
+      name: `Pattern ${index + 1}`,
+      steps: Array.from({ length: TOTAL_STEPS }, createEmptyStep),
+      length: 16,
+    });
+
+    const INITIAL_PATTERNS = Array.from({ length: PATTERN_COUNT }, (_, i) => createEmptyPattern(i));
+
+    // ============================================================================
+    // MIDI SERVICE
+    // ============================================================================
+
+    class MidiService {
+      constructor() {
+        this.midiAccess = null;
+        this.outputs = [];
+        this.warnedNoOutputs = false;
+      }
+
+      async initialize() {
+        if (!navigator.requestMIDIAccess) return;
+        try {
+          this.midiAccess = await navigator.requestMIDIAccess();
+          this.updateOutputs();
+          if (this.midiAccess) this.midiAccess.onstatechange = () => this.updateOutputs();
+        } catch (err) { console.error('MIDI Access failed', err); }
+      }
+
+      updateOutputs() {
+        if (!this.midiAccess) return;
+        this.outputs = Array.from(this.midiAccess.outputs.values());
+        if (this.outputs.length > 0) this.warnedNoOutputs = false;
+      }
+
+      getOutputs() { return this.outputs.map(o => ({ id: o.id, name: o.name || 'Unknown' })); }
+      
+      getOutput(id) {
+        if (!this.outputs.length) { if (!this.warnedNoOutputs) { this.warnedNoOutputs = true; } return undefined; }
+        return id ? this.outputs.find(o => o.id === id) : this.outputs[0];
+      }
+
+      sendNoteOn(outputId, channel, note, velocity) {
+        const output = this.getOutput(outputId);
+        if (output) output.send([0x90 + (channel - 1), note, velocity]);
+      }
+
+      sendNoteOff(outputId, channel, note) {
+        const output = this.getOutput(outputId);
+        if (output) output.send([0x80 + (channel - 1), note, 0]);
+      }
+
+      sendCC(outputId, channel, cc, value) {
+        const output = this.getOutput(outputId);
+        if (output) output.send([0xB0 + (channel - 1), cc, value]);
+      }
+
+      sendAllNotesOff(outputId, channel) {
+        const output = this.getOutput(outputId);
+        if (output) { output.send([0xB0 + (channel - 1), 123, 0]); output.send([0xB0 + (channel - 1), 120, 0]); }
+      }
+    }
+
+    const midiService = new MidiService();
+
+    // ============================================================================
+    // MIDI EXPORT
+    // ============================================================================
+
+    const downloadMidi = (patterns, chain, activePatternIdx, tempo, midiChannel = 1, macroCC_A = 20, macroCC_B = 21) => {
+      const PPQ = 480;
+      const strToBytes = (str) => str.split('').map(c => c.charCodeAt(0));
+      const numToBytes = (num, bytes) => { const arr = []; for (let i = bytes - 1; i >= 0; i--) arr.push((num >> (8 * i)) & 0xFF); return arr; };
+      const toVLQ = (num) => { let buffer = num & 0x7F; while ((num >>= 7)) { buffer <<= 8; buffer |= (num & 0x7F) | 0x80; } const arr = []; while (true) { arr.push(buffer & 0xFF); if (buffer & 0x80) buffer >>= 8; else break; } return arr; };
+
+      const sequencePatterns = chain.length > 0 ? chain.map(idx => patterns[idx]) : [patterns[activePatternIdx]];
+      const events = [];
+      let currentTick = 0;
+      const ticksPerSixteenth = PPQ / 4;
+      const channelOffset = (midiChannel - 1) & 0x0F;
+
+      sequencePatterns.forEach(pattern => {
+        pattern.steps.forEach((step, stepIdx) => {
+          const stepStartTick = currentTick;
+          if (step.active) {
+            const beatDur = 60.0 / tempo;
+            const sixteenthMs = (beatDur / 4) * 1000;
+            const msToTicks = (tempo * PPQ / 60000);
+
+            // Ratchets are per-step in playback: step.ratchet (default 1)
+            const ratchetCount = step.ratchet || 1;
+
+            // Strum is per-step in playback
+            const strumAmountPct = step.strumAmountPct || 0;
+            const strumDirection = step.strumDirection || 'DOWN';
+
+            // Build strum offset map keyed by NOTE INDEX (matches playback)
+            const strumOffsets = new Map(); // noteIndex -> offsetMs
+
+            const chordNotes = step.notes.filter(n => !isDrum(n.id));
+            if (strumAmountPct > 0 && chordNotes.length >= 2) {
+              // Safe spread window constrained by the shortest gate window in chord
+              const minGateWindowMs = Math.min(...chordNotes.map(n => (n.gateSteps ?? 1.0) * sixteenthMs));
+              const maxSpreadMs = Math.min(sixteenthMs * 0.95, minGateWindowMs * 0.95);
+              const spreadMs = maxSpreadMs * (strumAmountPct / 100);
+
+              const chordIndices = step.notes
+                .map((n, idx) => ({ note: n, idx }))
+                .filter(x => !isDrum(x.note.id))
+                .sort((a, b) => getMidiPitch(a.note.id) - getMidiPitch(b.note.id));
+
+              const N = chordIndices.length;
+
+              let orderedIndices;
+              if (strumDirection === 'UP') {
+                orderedIndices = [...chordIndices].reverse();
+              } else if (strumDirection === 'DOWN') {
+                orderedIndices = chordIndices;
+              } else {
+                // BOUNCE: up then down excluding endpoints (same as playback fix)
+                const up = chordIndices;
+                const down = chordIndices.slice(1, -1).reverse();
+                orderedIndices = [...up, ...down];
+              }
+
+              const L = orderedIndices.length;
+              orderedIndices.forEach((item, i) => {
+                const offsetMs = L > 1 ? (i / (L - 1)) * spreadMs : 0;
+                // Earliest strike only (bounce repeats indices)
+                if (!strumOffsets.has(item.idx)) {
+                  strumOffsets.set(item.idx, offsetMs);
+                }
+              });
+            }
+
+            // Now emit MIDI for each note with strum + ratchets
+            step.notes.forEach((note, noteIdx) => {
+              const swingMs = (stepIdx % 2 === 1) ? (sixteenthMs * (step.swing / 100) * 0.5) : 0;
+              const strumOffsetMs = strumOffsets.get(noteIdx) || 0;
+
+              const baseOffsetTicks = Math.round((note.microTiming + swingMs + strumOffsetMs) * msToTicks);
+              const baseOnTick = Math.max(0, stepStartTick + baseOffsetTicks);
+
+              const gateSteps = note.gateSteps ?? 1.0;
+              const gateWindowMs = gateSteps * sixteenthMs;
+
+              const ratchetSpacingMs = gateWindowMs / ratchetCount;
+              const ratchetDurationMs = ratchetSpacingMs * 0.95;
+
+              const spacingTicks = Math.max(1, Math.round(ratchetSpacingMs * msToTicks));
+              const durTicks = Math.max(1, Math.round(ratchetDurationMs * msToTicks));
+
+              const velocity = step.accent ? Math.min(127, Math.round(note.velocity * 1.5)) : Math.round(note.velocity);
+              const midiPitch = getMidiPitch(note.id);
+
+              // Send CC once at the first ratchet hit (keeps output clean)
+              events.push({ tick: baseOnTick, data: [0xB0 + channelOffset, macroCC_A, note.macroA] });
+              events.push({ tick: baseOnTick, data: [0xB0 + channelOffset, macroCC_B, note.macroB] });
+
+              for (let r = 0; r < ratchetCount; r++) {
+                let vel = velocity;
+
+                // Match playback: v_i = round(v0 * 0.8^i)
+                if (step.ratchetDecay && r > 0) {
+                  vel = Math.max(1, Math.round(velocity * Math.pow(0.8, r)));
+                }
+
+                const onTick = baseOnTick + r * spacingTicks;
+                events.push({ tick: onTick, data: [0x90 + channelOffset, midiPitch, vel] });
+                events.push({ tick: onTick + durTicks, data: [0x80 + channelOffset, midiPitch, 0] });
+              }
+            });
+          }
+          currentTick += ticksPerSixteenth;
+        });
+      });
+
+      const endTick = currentTick + PPQ;
+      events.sort((a, b) => a.tick - b.tick);
+
+      const trackBytes = [];
+      const mpqn = Math.round(60000000 / tempo);
+      trackBytes.push(0, 0xFF, 0x51, 0x03, ...numToBytes(mpqn, 3));
+
+      let lastTick = 0;
+      events.forEach(e => { const delta = Math.max(0, e.tick - lastTick); trackBytes.push(...toVLQ(delta), ...e.data); lastTick = e.tick; });
+      trackBytes.push(...toVLQ(endTick - lastTick), 0xFF, 0x2F, 0x00);
+
+      const headerBytes = [...strToBytes('MThd'), ...numToBytes(6, 4), ...numToBytes(0, 2), ...numToBytes(1, 2), ...numToBytes(PPQ, 2)];
+      const trackChunkHeader = [...strToBytes('MTrk'), ...numToBytes(trackBytes.length, 4)];
+      const fileBytes = new Uint8Array([...headerBytes, ...trackChunkHeader, ...trackBytes]);
+
+      const blob = new Blob([fileBytes], { type: 'audio/midi' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href = url; a.download = 'stepgrid16.mid'; a.click();
+      URL.revokeObjectURL(url);
+    };
+
+    // ============================================================================
+    // ICON COMPONENT
+    // ============================================================================
+
+    const Icon = ({ name, size = 12, className = '' }) => {
+      const ref = useRef(null);
+      useEffect(() => {
+        if (ref.current && lucide[name]) {
+          ref.current.innerHTML = '';
+          const svg = lucide.createElement(lucide[name]);
+          svg.setAttribute('width', size);
+          svg.setAttribute('height', size);
+          if (className) svg.setAttribute('class', className);
+          ref.current.appendChild(svg);
+        }
+      }, [name, size, className]);
+      return <span ref={ref} className={`inline-flex items-center ${className}`} />;
+    };
+
+    // ============================================================================
+    // PAD COMPONENT (E1: Gate drawing support)
+    // ============================================================================
+
+    const Pad = ({ 
+      label, mainValue, isActive, isCurrent, isSelected, isLocked, isPaintTarget,
+      semanticColor, gateValue, showGateBar, isGateMode, stepIdx,
+      onClick, onContextMenu, onPointerDown, onPointerEnter,
+      disabled
+    }) => {
+      const gatePercent = gateValue != null ? Math.min(100, gateValue * 100) : 0;
+      
+      return (
+        <button
+          data-step-idx={stepIdx}
+          disabled={!!disabled}
+          onClick={onClick}
+          onContextMenu={(e) => { if (onContextMenu) { e.preventDefault(); onContextMenu(e); } }}
+          onPointerDown={onPointerDown}
+          onPointerEnter={onPointerEnter}
+          className={`
+            relative flex flex-col justify-between p-1.5 transition-none overflow-hidden h-full w-full touch-none
+            ${isSelected ? 'z-20' : isActive ? 'bg-[var(--panel2)]' : 'bg-[var(--cell)]'}
+            ${isCurrent && !isSelected ? 'bg-[var(--play)]' : ''}
+            ${isPaintTarget ? 'bg-[var(--sel)]' : ''}
+            border
+            ${disabled ? 'opacity-25 cursor-not-allowed pointer-events-none' : 'hover:bg-[var(--cellHover)]'}
+          `}
+          style={{
+            borderColor: disabled
+              ? 'transparent'
+              : (isSelected ? (semanticColor || 'var(--accent)') : 
+                 isPaintTarget ? 'var(--accent)' :
+                 isLocked ? semanticColor : 'transparent'),
+            backgroundColor: isSelected ? 'var(--panel2)' : undefined
+          }}
+        >
+          {showGateBar && gateValue != null && gateValue > 0 && (
+            <div 
+              className={`absolute bottom-0 left-0 h-1 ${isGateMode ? 'bg-[var(--accent)]' : 'bg-[var(--line2)]'}`}
+              style={{ width: `${gatePercent}%`, opacity: isGateMode ? 1 : 0.5 }}
+            />
+          )}
+          
+          <div className="flex justify-between items-start w-full relative z-10">
+            <span className={`text-[7px] font-bold tracking-widest ${isSelected ? 'text-[var(--text)]' : 'sg-dim'}`}>{label}</span>
+            {isLocked && <Icon name="Zap" size={8} className="text-[var(--warn)]" />}
+            {isActive && !isLocked && !isSelected && <div className="w-1 h-1 bg-[var(--text)] opacity-30" />}
+          </div>
+          <div className="flex flex-col items-center justify-center relative z-10 flex-1 min-h-0">
+            <span className={`text-[10px] font-bold leading-tight tracking-tighter text-center px-1 ${isSelected ? 'text-[var(--text)]' : isActive ? 'text-[var(--text)]' : 'sg-disabled'}`}
+                  style={isSelected && semanticColor ? { color: semanticColor } : {}}>
+              {mainValue}
+            </span>
+          </div>
+        </button>
+      );
+    };
+
+    // ============================================================================
+    // PAD GRID (E1: Gate drawing, D1: Discrete paint mutations)
+    // ============================================================================
+
+    const PadGrid = ({ pads, gridRef }) => (
+      <div 
+        ref={gridRef}
+        className="grid grid-cols-8 grid-rows-2 gap-[1px] bg-[var(--line)] border border-[var(--line)] w-full shrink-0" 
+        style={{aspectRatio: '5/1'}}
+      >
+        {pads.map((p, i) => <Pad key={i} {...p} />)}
+      </div>
+    );
+
+    // ============================================================================
+    // MAIN APP
+    // ============================================================================
+
+    function App() {
+      const [patterns, setPatterns] = useState(INITIAL_PATTERNS);
+      const [instrumentMode, setInstrumentMode] = useState('MEL'); // UI mode for entry, NOT authoritative state
+      const [inputFlow, setInputFlow] = useState(InputFlow.STEP_FIRST); // D2: Default is step-first
+      const [heldNoteId, setHeldNoteId] = useState(null); // NoteID when in NOTE_FIRST
+      const [paintTargets, setPaintTargets] = useState(new Set());
+      const [isPainting, setIsPainting] = useState(false);
+      
+      // v068: Circuit-style gate span selection state
+      const [isSelectingGateSpan, setIsSelectingGateSpan] = useState(false);
+      const [gateSpanBase, setGateSpanBase] = useState(null); // Whole step base (1-16)
+      const [gateSpanFraction, setGateSpanFraction] = useState(0); // Fractional trim (0 or 0.5)
+      const [gateTargetError, setGateTargetError] = useState(null); // Error message for targeting
+      
+      const [scale, setScale] = useState(1);
+      const [showScaleWarning, setShowScaleWarning] = useState(false);
+      
+      const [state, setState] = useState({
+        tempo: DEFAULT_TEMPO,
+        isPlaying: false,
+        currentStep: -1,
+        activePatternIdx: 0,
+        midiChannel: 1,
+        midiOutputId: null,
+        rootNote: 0,
+        scaleType: ScaleType.MAJOR,
+        macroCC_A: 20,
+        macroCC_B: 21,
+        stepRecord: false,
+        chainEnabled: false,
+        chain: [],
+        chainStep: 0,
+        chainLoop: true,
+        attackMs: 2,
+        releaseMs: 60,
+        randomSeed: Math.floor(Math.random() * 0xFFFFFFFF),
+        randomCounter: 0,
+        // Fix 2: Arpeggio state (grid-writing mode, not live processor)
+        arpEnabled: false,
+        arpDirection: 'UP', // UP, DOWN, UP_DOWN
+        arpOctaves: 1, // 1-3
+        // v068 FIX #4: Strum moved to per-step (see createEmptyStep)
+        // v068: Preview volume/mute (audio only, never MIDI)
+        previewVolumePct: 100, // 0-100
+        previewMuted: false,
+      });
+
+      // Fix 3: Seed draft - separate from committed seed
+      const [seedDraft, setSeedDraft] = useState(null); // null means showing committed seed
+
+      const [selectedStepIdx, setSelectedStepIdx] = useState(null);
+      const [selectedNoteIdx, setSelectedNoteIdx] = useState(0);
+      const [stackNoteExplicit, setStackNoteExplicit] = useState(false); // True when user explicitly clicked a stack note
+      const [editMode, setEditMode] = useState(EditMode.NOTE);
+      const [midiOutputs, setMidiOutputs] = useState([]);
+      const [octaveShift, setOctaveShift] = useState(0);
+      const [midiLog, setMidiLog] = useState([]);
+      const [clipboardPattern, setClipboardPattern] = useState(null);
+      const [clipboardStep, setClipboardStep] = useState(null);
+
+      const stateRef = useRef(state);
+      const patternsRef = useRef(patterns);
+      const audioCtxRef = useRef(null);
+      const previewGainRef = useRef(null); // v068: Preview audio bus (mute/volume control)
+      const nextNoteTime = useRef(0.0);
+      const currentStepRef = useRef(0);
+      const chainStepRef = useRef(0);
+      const timerID = useRef(null);
+      const activeVoicesRef = useRef(new Map());
+      const pendingTriggersRef = useRef(new Set());
+      const stopSignalRef = useRef(false);
+      const executionGridRef = useRef(null);
+
+      useEffect(() => { stateRef.current = state; }, [state]);
+      useEffect(() => { patternsRef.current = patterns; }, [patterns]);
+      
+      // v068: Update preview gain when volume/mute changes
+      useEffect(() => {
+        if (previewGainRef.current) {
+          const vol = state.previewMuted ? 0 : (state.previewVolumePct / 100);
+          previewGainRef.current.gain.value = vol;
+        }
+      }, [state.previewMuted, state.previewVolumePct]);
+
+      // Responsive scaling
+      useEffect(() => {
+        const updateScale = () => {
+          const scaleX = window.innerWidth / CANONICAL_WIDTH;
+          const scaleY = window.innerHeight / CANONICAL_HEIGHT;
+          const newScale = Math.min(scaleX, scaleY);
+          setScale(Math.max(MIN_SCALE, newScale));
+          setShowScaleWarning(newScale < 0.6);
+        };
+        updateScale();
+        window.addEventListener('resize', updateScale);
+        return () => window.removeEventListener('resize', updateScale);
+      }, []);
+
+      const resumeAudio = useCallback(() => {
+        if (!audioCtxRef.current) audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
+        if (audioCtxRef.current.state === 'suspended') audioCtxRef.current.resume();
+        
+        // v068: Initialize preview gain bus if needed
+        if (!previewGainRef.current) {
+          previewGainRef.current = audioCtxRef.current.createGain();
+          previewGainRef.current.connect(audioCtxRef.current.destination);
+        }
+        // Apply current volume/mute state
+        const vol = stateRef.current.previewMuted ? 0 : (stateRef.current.previewVolumePct / 100);
+        previewGainRef.current.gain.value = vol;
+        
+        return audioCtxRef.current;
+      }, []);
+
+      const logMidi = useCallback((status, channel, d1, d2) => {
+        setMidiLog(prev => [`${status.toString(16).toUpperCase()} C${channel} ${d1}:${d2}`, ...prev].slice(0, 3));
+      }, []);
+
+      const stopVoice = useCallback((voiceId) => {
+        const voice = activeVoicesRef.current.get(voiceId);
+        if (voice) {
+          if (voice.timeoutId) clearTimeout(voice.timeoutId);
+          midiService.sendNoteOff(stateRef.current.midiOutputId, stateRef.current.midiChannel, voice.midiPitch);
+          if (voice.nodes) {
+            const now = audioCtxRef.current?.currentTime || 0;
+            voice.nodes.forEach(node => {
+              if (node.gain) { node.gain.cancelScheduledValues(now); node.gain.setTargetAtTime(0, now, 0.015); }
+              if (node.stop) node.stop(now + 0.1);
+              if (node.disconnect) node.disconnect();
+            });
+          }
+          activeVoicesRef.current.delete(voiceId);
+        }
+      }, []);
+
+      const stopAllVoices = useCallback(() => {
+        activeVoicesRef.current.forEach((_, id) => stopVoice(id));
+      }, [stopVoice]);
+
+      // B1: playRefTone routes by NoteID, not by mode flag
+      const playRefTone = useCallback((noteId, velocity = 100, durationMs = 300) => {
+        const ctx = resumeAudio();
+        const now = ctx.currentTime;
+        const amp = ctx.createGain();
+        const nodes = [];
+        const voiceId = `v_${noteId}_${Date.now()}`;
+        const gainVal = (velocity / 127) * 0.4;
+        const midiPitch = getMidiPitch(noteId);
+
+        // B2: Clamp attack/release inside gate duration
+        const attackMs = Math.min(stateRef.current.attackMs, durationMs * 0.5);
+        const releaseMs = Math.min(stateRef.current.releaseMs, durationMs - attackMs);
+
+        amp.gain.setValueAtTime(0, now);
+        amp.gain.linearRampToValueAtTime(gainVal, now + (attackMs / 1000));
+        // B2: Sound must end at gate boundary
+        amp.gain.setValueAtTime(gainVal, now + (durationMs - releaseMs) / 1000);
+        amp.gain.exponentialRampToValueAtTime(0.001, now + (durationMs / 1000));
+        // v068: Route through preview bus (not ctx.destination directly)
+        amp.connect(previewGainRef.current || ctx.destination);
+        // FIX: Add amp to nodes array for proper cleanup
+        nodes.push(amp);
+
+        // P1-4 FIX: Each drum has distinct synthesis - no shared branches
+        if (isDrum(noteId)) {
+          const drumType = noteId - 128;
+          
+          if (drumType === 0) { // KIK - sine with pitch drop
+            const osc = ctx.createOscillator(); osc.type = 'sine';
+            osc.frequency.setValueAtTime(150, now);
+            osc.frequency.exponentialRampToValueAtTime(40, now + 0.15);
+            osc.connect(amp); osc.start(now); nodes.push(osc);
+          } else if (drumType === 1) { // SNR - noise with bandpass + sine body
+            const bufferSize = ctx.sampleRate * 0.2;
+            const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+            const data = buffer.getChannelData(0);
+            for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+            const noise = ctx.createBufferSource(); noise.buffer = buffer;
+            const bpf = ctx.createBiquadFilter(); bpf.type = 'bandpass'; bpf.frequency.value = 1200; bpf.Q.value = 1;
+            noise.connect(bpf).connect(amp); noise.start(now); nodes.push(noise, bpf);
+            const body = ctx.createOscillator(); body.type = 'triangle'; body.frequency.value = 180;
+            const bodyGain = ctx.createGain(); bodyGain.gain.setValueAtTime(gainVal * 0.3, now);
+            bodyGain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
+            // v068: Route through preview bus
+            body.connect(bodyGain).connect(previewGainRef.current || ctx.destination); body.start(now); nodes.push(body, bodyGain);
+          } else if (drumType === 2) { // CHH - highpass noise, SHORT
+            const bufferSize = ctx.sampleRate * 0.04;
+            const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+            const data = buffer.getChannelData(0);
+            for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+            const noise = ctx.createBufferSource(); noise.buffer = buffer;
+            const hpf = ctx.createBiquadFilter(); hpf.type = 'highpass'; hpf.frequency.value = 9000;
+            noise.connect(hpf).connect(amp); noise.start(now); nodes.push(noise, hpf);
+          } else if (drumType === 3) { // OHH - highpass noise, LONGER + lower freq
+            const bufferSize = ctx.sampleRate * 0.25;
+            const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+            const data = buffer.getChannelData(0);
+            for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+            const noise = ctx.createBufferSource(); noise.buffer = buffer;
+            const hpf = ctx.createBiquadFilter(); hpf.type = 'highpass'; hpf.frequency.value = 6000;
+            noise.connect(hpf).connect(amp); noise.start(now); nodes.push(noise, hpf);
+          } else if (drumType === 4) { // CLP - noise burst with resonant peak
+            const bufferSize = ctx.sampleRate * 0.12;
+            const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+            const data = buffer.getChannelData(0);
+            for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+            const noise = ctx.createBufferSource(); noise.buffer = buffer;
+            const bpf = ctx.createBiquadFilter(); bpf.type = 'bandpass'; bpf.frequency.value = 2500; bpf.Q.value = 4;
+            noise.connect(bpf).connect(amp); noise.start(now); nodes.push(noise, bpf);
+          } else if (drumType === 5) { // RIM - high click
+            const osc = ctx.createOscillator(); osc.type = 'square'; osc.frequency.value = 800;
+            const clickGain = ctx.createGain(); clickGain.gain.setValueAtTime(gainVal, now);
+            clickGain.gain.exponentialRampToValueAtTime(0.001, now + 0.025);
+            // v068: Route through preview bus
+            osc.connect(clickGain).connect(previewGainRef.current || ctx.destination); osc.start(now); nodes.push(osc, clickGain);
+          } else if (drumType === 6) { // LT - low tom
+            const osc = ctx.createOscillator(); osc.type = 'sine';
+            osc.frequency.setValueAtTime(100, now);
+            osc.frequency.exponentialRampToValueAtTime(60, now + 0.18);
+            osc.connect(amp); osc.start(now); nodes.push(osc);
+          } else if (drumType === 7) { // MT - mid tom
+            const osc = ctx.createOscillator(); osc.type = 'sine';
+            osc.frequency.setValueAtTime(150, now);
+            osc.frequency.exponentialRampToValueAtTime(90, now + 0.14);
+            osc.connect(amp); osc.start(now); nodes.push(osc);
+          } else if (drumType === 8) { // HT - high tom
+            const osc = ctx.createOscillator(); osc.type = 'sine';
+            osc.frequency.setValueAtTime(200, now);
+            osc.frequency.exponentialRampToValueAtTime(120, now + 0.1);
+            osc.connect(amp); osc.start(now); nodes.push(osc);
+          } else if (drumType === 9) { // CYM - noise with resonance
+            const bufferSize = ctx.sampleRate * 0.5;
+            const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+            const data = buffer.getChannelData(0);
+            for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+            const noise = ctx.createBufferSource(); noise.buffer = buffer;
+            const hpf = ctx.createBiquadFilter(); hpf.type = 'highpass'; hpf.frequency.value = 5000;
+            const peak = ctx.createBiquadFilter(); peak.type = 'peaking'; peak.frequency.value = 8000; peak.Q.value = 5; peak.gain.value = 6;
+            noise.connect(hpf).connect(peak).connect(amp); noise.start(now); nodes.push(noise, hpf, peak);
+          } else if (drumType === 10) { // RS - ride short
+            const bufferSize = ctx.sampleRate * 0.12;
+            const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+            const data = buffer.getChannelData(0);
+            for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+            const noise = ctx.createBufferSource(); noise.buffer = buffer;
+            const bpf = ctx.createBiquadFilter(); bpf.type = 'bandpass'; bpf.frequency.value = 7000; bpf.Q.value = 2;
+            noise.connect(bpf).connect(amp); noise.start(now); nodes.push(noise, bpf);
+          } else if (drumType === 11) { // CB - cowbell (two oscillators)
+            const osc1 = ctx.createOscillator(); osc1.type = 'square'; osc1.frequency.value = 587;
+            const osc2 = ctx.createOscillator(); osc2.type = 'square'; osc2.frequency.value = 845;
+            const mix = ctx.createGain(); mix.gain.value = 0.5;
+            osc1.connect(mix); osc2.connect(mix); mix.connect(amp);
+            osc1.start(now); osc2.start(now); nodes.push(osc1, osc2, mix);
+          } else if (drumType === 12) { // MA - maracas
+            const bufferSize = ctx.sampleRate * 0.06;
+            const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+            const data = buffer.getChannelData(0);
+            for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+            const noise = ctx.createBufferSource(); noise.buffer = buffer;
+            const hpf = ctx.createBiquadFilter(); hpf.type = 'highpass'; hpf.frequency.value = 10000;
+            noise.connect(hpf).connect(amp); noise.start(now); nodes.push(noise, hpf);
+          } else if (drumType === 13) { // CL - clave
+            const osc = ctx.createOscillator(); osc.type = 'sine';
+            osc.frequency.setValueAtTime(2500, now);
+            osc.frequency.exponentialRampToValueAtTime(1800, now + 0.02);
+            osc.connect(amp); osc.start(now); nodes.push(osc);
+          } else if (drumType === 14) { // AG - agogo high
+            const osc = ctx.createOscillator(); osc.type = 'triangle';
+            osc.frequency.setValueAtTime(900, now);
+            osc.frequency.exponentialRampToValueAtTime(700, now + 0.08);
+            osc.connect(amp); osc.start(now); nodes.push(osc);
+          } else if (drumType === 15) { // BG - agogo low
+            const osc = ctx.createOscillator(); osc.type = 'triangle';
+            osc.frequency.setValueAtTime(600, now);
+            osc.frequency.exponentialRampToValueAtTime(450, now + 0.1);
+            osc.connect(amp); osc.start(now); nodes.push(osc);
+          }
+        } else {
+          const osc = ctx.createOscillator(); osc.type = 'triangle';
+          osc.frequency.setValueAtTime(440 * Math.pow(2, (midiPitch - 69) / 12), now);
+          osc.connect(amp); osc.start(now); nodes.push(osc);
+        }
+
+        const timeoutId = setTimeout(() => stopVoice(voiceId), durationMs + 100);
+        activeVoicesRef.current.set(voiceId, { midiPitch, nodes, timeoutId });
+
+        midiService.sendNoteOn(stateRef.current.midiOutputId, stateRef.current.midiChannel, midiPitch, Math.round(velocity));
+        logMidi(0x90, stateRef.current.midiChannel, midiPitch, Math.round(velocity));
+      }, [resumeAudio, stopVoice, logMidi]);
+
+      // B1, B2: scheduleNote uses NoteID routing and gate clamping
+      const scheduleNote = useCallback((stepNumber, time, patternIdx) => {
+        // v068 FIX #3: Only update state when currentStep actually changes
+        requestAnimationFrame(() => setState(s => s.currentStep === stepNumber ? s : { ...s, currentStep: stepNumber }));
+        const pattern = patternsRef.current[patternIdx];
+        const step = pattern.steps[stepNumber];
+        if (stepNumber >= pattern.length) return;
+
+        if (step && step.active) {
+          const beatDur = 60.0 / stateRef.current.tempo;
+          const sixteenthMs = (beatDur / 4) * 1000;
+          
+          // P0-3: Ratchet subdivisions - INSIDE gate window (trap style)
+          const ratchetCount = step.ratchet || 1;
+          
+          // v068 FIX #4: Strum is per-step, read from step not global state
+          const strumAmountPct = step.strumAmountPct || 0;
+          const strumDirection = step.strumDirection || 'DOWN';
+          const chordNotes = step.notes.filter(n => !isDrum(n.id));
+          
+          // v068 FIX #5: Build strum offset map keyed by note INDEX, not NoteID
+          // This prevents collisions when multiple notes have same NoteID
+          const strumOffsets = new Map(); // noteIndex -> offsetMs
+          
+          if (strumAmountPct > 0 && chordNotes.length >= 2) {
+            // Compute safe spread window using gateSteps
+            const minGateWindowMs = Math.min(...chordNotes.map(n => (n.gateSteps ?? 1.0) * sixteenthMs));
+            const maxSpreadMs = Math.min(sixteenthMs * 0.95, minGateWindowMs * 0.95);
+            const spreadMs = maxSpreadMs * (strumAmountPct / 100);
+            
+            // Get indices of chord notes in original array, sorted by pitch
+            const chordIndices = step.notes
+              .map((n, idx) => ({ note: n, idx }))
+              .filter(x => !isDrum(x.note.id))
+              .sort((a, b) => getMidiPitch(a.note.id) - getMidiPitch(b.note.id));
+            
+            const N = chordIndices.length;
+            
+            // Determine ordering based on direction
+            let orderedIndices;
+            if (strumDirection === 'DOWN') {
+              // Low to high
+              orderedIndices = chordIndices;
+            } else if (strumDirection === 'UP') {
+              // High to low
+              orderedIndices = [...chordIndices].reverse();
+            } else {
+              // BOUNCE: up then down (classic), excluding endpoints to avoid repeats
+              // Example N=6: 0 1 2 3 4 5 4 3 2 1
+              const up = chordIndices;
+              const down = chordIndices.slice(1, -1).reverse();
+              orderedIndices = [...up, ...down];
+            }
+            
+            // Assign offsets by original note index
+            // Use orderedIndices.length for bounce (which may be > N)
+            const L = orderedIndices.length;
+            orderedIndices.forEach((item, i) => {
+              const offsetMs = L > 1 ? (i / (L - 1)) * spreadMs : 0;
+              // Note: same note index may appear twice in bounce; we want the EARLIEST strike for that note
+              if (!strumOffsets.has(item.idx)) {
+                strumOffsets.set(item.idx, offsetMs);
+              }
+            });
+          }
+          
+          // Schedule all notes (drums + pitched)
+          step.notes.forEach((note, noteIdx) => {
+            const swingMs = (stepNumber % 2 === 1) ? (sixteenthMs * (step.swing / 100) * 0.5) : 0;
+            // v068 FIX #5: Look up offset by note index
+            const strumOffsetMs = strumOffsets.get(noteIdx) || 0;
+            const basePlayTime = time + ((note.microTiming + swingMs + strumOffsetMs) / 1000);
+            
+            // v068: gateSteps is step-span (1.0-16.0), gateWindowMs = gateSteps * sixteenthMs
+            const gateSteps = note.gateSteps ?? 1.0;
+            const gateWindowMs = gateSteps * sixteenthMs;
+            const ratchetSpacing = gateWindowMs / ratchetCount;
+            // Duration slightly less than spacing to avoid overlap (95%)
+            const ratchetDuration = ratchetSpacing * 0.95;
+            
+            // Schedule each ratchet subdivision
+            for (let r = 0; r < ratchetCount; r++) {
+              const playTime = basePlayTime + (r * ratchetSpacing / 1000);
+              const delay = Math.max(0, (playTime - (audioCtxRef.current?.currentTime || 0)) * 1000);
+              let velocity = step.accent ? Math.min(127, Math.round(note.velocity * 1.5)) : note.velocity;
+              
+              // Decay formula v_i = round(v0 * 0.8^i)
+              if (step.ratchetDecay && r > 0) {
+                velocity = Math.max(1, Math.round(velocity * Math.pow(0.8, r)));
+              }
+
+              const trigger = setTimeout(() => {
+                pendingTriggersRef.current.delete(trigger);
+                midiService.sendCC(stateRef.current.midiOutputId, stateRef.current.midiChannel, stateRef.current.macroCC_A, note.macroA);
+                midiService.sendCC(stateRef.current.midiOutputId, stateRef.current.midiChannel, stateRef.current.macroCC_B, note.macroB);
+                // B1: Route by note.id (NoteID)
+                playRefTone(note.id, velocity, ratchetDuration);
+              }, delay);
+              pendingTriggersRef.current.add(trigger);
+            }
+          });
+        }
+      }, [playRefTone]);
+
+      const stopPlayback = useCallback(() => {
+        stopSignalRef.current = true;
+        setState(s => ({ ...s, isPlaying: false, currentStep: -1 }));
+        if (timerID.current) { clearTimeout(timerID.current); timerID.current = null; }
+        pendingTriggersRef.current.forEach(t => clearTimeout(t));
+        pendingTriggersRef.current.clear();
+        stopAllVoices();
+        midiService.sendAllNotesOff(stateRef.current.midiOutputId, stateRef.current.midiChannel);
+      }, [stopAllVoices]);
+
+      // P0-1 FIX: Chain logic - properly handle pattern transitions
+      const togglePlay = useCallback(() => {
+        resumeAudio();
+        if (!stateRef.current.isPlaying) {
+          stopSignalRef.current = false;
+          currentStepRef.current = 0;
+          chainStepRef.current = 0;
+          nextNoteTime.current = audioCtxRef.current.currentTime;
+          
+          const chainActive = stateRef.current.chainEnabled && stateRef.current.chain.length > 0;
+          const initialPattern = chainActive ? stateRef.current.chain[0] : stateRef.current.activePatternIdx;
+          
+          setState(s => ({ ...s, isPlaying: true, chainStep: 0, activePatternIdx: initialPattern }));
+          
+          const loop = () => {
+            if (stopSignalRef.current) return;
+            
+            const activeS = stateRef.current;
+            const chainActive = activeS.chainEnabled && activeS.chain.length > 0;
+            
+            while (nextNoteTime.current < audioCtxRef.current.currentTime + 0.1) {
+              if (stopSignalRef.current) return;
+              
+              // Get current pattern index with safety check
+              const pIdx = chainActive ? activeS.chain[chainStepRef.current] : activeS.activePatternIdx;
+              if (pIdx === undefined || pIdx < 0 || pIdx >= patternsRef.current.length) {
+                stopPlayback();
+                return;
+              }
+              
+              const pLength = patternsRef.current[pIdx].length;
+              scheduleNote(currentStepRef.current, nextNoteTime.current, pIdx);
+              nextNoteTime.current += (60.0 / activeS.tempo) / 4;
+              currentStepRef.current++;
+              
+              // Check for pattern end
+              if (currentStepRef.current >= pLength) {
+                currentStepRef.current = 0;
+                
+                if (chainActive) {
+                  const nextChainStep = chainStepRef.current + 1;
+                  
+                  if (nextChainStep >= activeS.chain.length) {
+                    // End of chain
+                    if (activeS.chainLoop) {
+                      chainStepRef.current = 0;
+                      const nextPattern = activeS.chain[0];
+                      setState(s => ({ ...s, chainStep: 0, activePatternIdx: nextPattern }));
+                    } else {
+                      stopPlayback();
+                      return;
+                    }
+                  } else {
+                    // Move to next pattern in chain
+                    chainStepRef.current = nextChainStep;
+                    const nextPattern = activeS.chain[nextChainStep];
+                    setState(s => ({ ...s, chainStep: nextChainStep, activePatternIdx: nextPattern }));
+                  }
+                }
+              }
+            }
+            timerID.current = window.setTimeout(loop, 25);
+          };
+          loop();
+        } else {
+          stopPlayback();
+        }
+      }, [scheduleNote, stopPlayback, resumeAudio]);
+
+      const updateActivePattern = useCallback((updates) => {
+        setPatterns(prev => {
+          const next = [...prev];
+          next[stateRef.current.activePatternIdx] = { ...next[stateRef.current.activePatternIdx], ...updates };
+          return next;
+        });
+      }, []);
+
+      const updateStepByIdx = useCallback((stepIdx, updates) => {
+        setPatterns(prev => {
+          const next = [...prev];
+          const p = { ...next[stateRef.current.activePatternIdx] };
+          p.steps = [...p.steps];
+          p.steps[stepIdx] = { ...p.steps[stepIdx], ...updates };
+          next[stateRef.current.activePatternIdx] = p;
+          return next;
+        });
+      }, []);
+
+      const clearPattern = useCallback(() => {
+        if (!confirm("Clear this pattern?")) return;
+        // Stop playback immediately when clearing
+        if (stateRef.current.isPlaying) {
+          stopPlayback();
+        }
+        updateActivePattern(createEmptyPattern(state.activePatternIdx));
+      }, [state.activePatternIdx, updateActivePattern, stopPlayback]);
+
+      const copyPattern = useCallback(() => {
+        setClipboardPattern(JSON.parse(JSON.stringify(patterns[state.activePatternIdx])));
+      }, [patterns, state.activePatternIdx]);
+
+      const pastePattern = useCallback(() => {
+        if (!clipboardPattern) return;
+        updateActivePattern({ ...clipboardPattern, id: state.activePatternIdx });
+      }, [clipboardPattern, state.activePatternIdx, updateActivePattern]);
+
+      // Fix 5: Step copy/paste
+      const copyStep = useCallback(() => {
+        if (selectedStepIdx === null) return;
+        const step = patterns[state.activePatternIdx].steps[selectedStepIdx];
+        setClipboardStep(JSON.parse(JSON.stringify(step)));
+      }, [selectedStepIdx, patterns, state.activePatternIdx]);
+
+      const pasteStep = useCallback(() => {
+        if (selectedStepIdx === null || !clipboardStep) return;
+        // Paste step data but keep unique ID
+        // P1 FIX: Include per-step strum properties
+        updateStepByIdx(selectedStepIdx, {
+          active: clipboardStep.active,
+          notes: JSON.parse(JSON.stringify(clipboardStep.notes)),
+          swing: clipboardStep.swing,
+          accent: clipboardStep.accent,
+          ratchet: clipboardStep.ratchet,
+          ratchetDecay: clipboardStep.ratchetDecay,
+          strumAmountPct: clipboardStep.strumAmountPct ?? 0,
+          strumDirection: clipboardStep.strumDirection ?? 'DOWN',
+        });
+      }, [selectedStepIdx, clipboardStep, updateStepByIdx]);
+
+      const updateSelectedStep = useCallback((updates) => {
+        if (selectedStepIdx === null) return;
+        updateStepByIdx(selectedStepIdx, updates);
+      }, [selectedStepIdx, updateStepByIdx]);
+
+      const updateSelectedNote = useCallback((updates) => {
+        if (selectedStepIdx === null) return;
+        const step = patterns[state.activePatternIdx].steps[selectedStepIdx];
+        if (step.notes.length === 0) return;
+        const safeNoteIdx = Math.min(selectedNoteIdx, step.notes.length - 1);
+        if (safeNoteIdx < 0) return;
+        const newNotes = [...step.notes];
+        newNotes[safeNoteIdx] = { ...newNotes[safeNoteIdx], ...updates };
+        updateSelectedStep({ notes: newNotes });
+      }, [selectedStepIdx, selectedNoteIdx, patterns, state.activePatternIdx, updateSelectedStep]);
+
+      useEffect(() => {
+        if (selectedStepIdx === null) return;
+        const step = patterns[state.activePatternIdx].steps[selectedStepIdx];
+        if (step.notes.length > 0 && selectedNoteIdx >= step.notes.length) {
+          setSelectedNoteIdx(step.notes.length - 1);
+          setStackNoteExplicit(false); // Clear explicit when auto-adjusting
+        }
+      }, [selectedStepIdx, patterns, state.activePatternIdx, selectedNoteIdx]);
+
+      // Resolve pad index to NoteID
+      const resolveNoteId = useCallback((padIdx, shift, scaleType, root, mode) => {
+        if (mode === 'DRUM') {
+          return DRUM_PAD_MAP[padIdx];
+        }
+        const intervals = SCALES[scaleType];
+        const row = Math.floor(padIdx / 8);
+        const col = padIdx % 8;
+        const intervalIdx = col % intervals.length;
+        const oct = BASE_OCTAVE + shift + row + Math.floor(col / intervals.length);
+        return ((oct + 1) * 12) + root + intervals[intervalIdx];
+      }, []);
+
+      const addToChain = useCallback((pIdx) => {
+        setState(s => ({ ...s, chain: [...s.chain, pIdx] }));
+      }, []);
+
+      // D1: Note-first paint - discrete mutations
+      const handlePaintStart = useCallback((stepIdx) => {
+        if (inputFlow !== InputFlow.NOTE_FIRST || heldNoteId === null) return;
+        setIsPainting(true);
+        setPaintTargets(new Set([stepIdx]));
+      }, [inputFlow, heldNoteId]);
+
+      const handlePaintMove = useCallback((stepIdx) => {
+        if (!isPainting || heldNoteId === null) return;
+        // D1: Each step entered is tracked for discrete mutation
+        setPaintTargets(prev => new Set([...prev, stepIdx]));
+      }, [isPainting, heldNoteId]);
+
+      const handlePaintEnd = useCallback(() => {
+        if (!isPainting || heldNoteId === null) {
+          setIsPainting(false);
+          setPaintTargets(new Set());
+          return;
+        }
+        // D1: Commit exactly N mutations for N steps
+        paintTargets.forEach(stepIdx => {
+          const step = patterns[state.activePatternIdx].steps[stepIdx];
+          const exists = step.notes.some(n => n.id === heldNoteId);
+          if (!exists) {
+            updateStepByIdx(stepIdx, { active: true, notes: [...step.notes, createEmptyNote(heldNoteId)] });
+          }
+        });
+        setIsPainting(false);
+        setPaintTargets(new Set());
+      }, [isPainting, heldNoteId, paintTargets, patterns, state.activePatternIdx, updateStepByIdx]);
+
+      // v068 FIX #1: Define these BEFORE the useEffect that references them
+      // v068: Ref for entry grid (for gate span slide gesture)
+      const entryGridRef = useRef(null);
+
+      // v068: Gate targeting helper - returns targeted note or null with error
+      // P0 FIX: Use patternsRef.current to read canonical step data, not stale activePattern closure
+      const getGateTarget = useCallback(() => {
+        if (selectedStepIdx === null) return { note: null, noteIdx: null, noteIdxs: null, error: 'SELECT STEP' };
+        const pattern = patternsRef.current[stateRef.current.activePatternIdx];
+        const step = pattern.steps[selectedStepIdx];
+        if (step.notes.length === 0) return { note: null, noteIdx: null, noteIdxs: null, error: 'NO NOTES' };
+
+        // Only target single note if user EXPLICITLY clicked a stack note
+        if (stackNoteExplicit && selectedNoteIdx !== null && selectedNoteIdx < step.notes.length) {
+          return { note: step.notes[selectedNoteIdx], noteIdx: selectedNoteIdx, noteIdxs: [selectedNoteIdx], error: null };
+        }
+
+        // If only one note, target it
+        if (step.notes.length === 1) {
+          return { note: step.notes[0], noteIdx: 0, noteIdxs: [0], error: null };
+        }
+
+        // Multiple notes and none explicitly selected:
+        // Default to ALL PITCHED notes (fixes "only one note held" in chords)
+        const pitchedIdxs = step.notes
+          .map((n, i) => ({ n, i }))
+          .filter(x => isPitch(x.n.id))
+          .map(x => x.i);
+
+        if (pitchedIdxs.length === 0) {
+          // If it's drums-only, fall back to targeting all notes
+          const allIdxs = step.notes.map((_, i) => i);
+          return { note: step.notes[0], noteIdx: 0, noteIdxs: allIdxs, error: null };
+        }
+
+        return { note: step.notes[pitchedIdxs[0]], noteIdx: pitchedIdxs[0], noteIdxs: pitchedIdxs, error: null };
+      }, [selectedStepIdx, selectedNoteIdx, stackNoteExplicit]);
+
+      // v068: Apply gate span to targeted note(s)
+      // P0 FIX: Use patternsRef.current for canonical step data
+      const applyGateSpan = useCallback((wholeSteps, fraction = 0) => {
+        const target = getGateTarget();
+        if (target.error) {
+          setGateTargetError(target.error);
+          setTimeout(() => setGateTargetError(null), 1500);
+          return;
+        }
+
+        // Minimum gate is 10% of a step-span
+        const gateSteps = Math.max(0.1, wholeSteps * (1 - fraction));
+        const pattern = patternsRef.current[stateRef.current.activePatternIdx];
+        const step = pattern.steps[selectedStepIdx];
+
+        const newNotes = [...step.notes];
+        const idxs = target.noteIdxs && target.noteIdxs.length ? target.noteIdxs : [target.noteIdx];
+
+        idxs.forEach(i => {
+          if (i != null && i >= 0 && i < newNotes.length) {
+            newNotes[i] = { ...newNotes[i], gateSteps };
+          }
+        });
+
+        updateSelectedStep({ notes: newNotes });
+      }, [getGateTarget, selectedStepIdx, updateSelectedStep]);
+
+      // v068: Circuit-style gate span slide gesture handlers
+      useEffect(() => {
+        if (!isSelectingGateSpan || gateSpanBase === null) return;
+        
+        const handleMove = (e) => {
+          if (!entryGridRef.current) return;
+          
+          // Find the pad for the current gateSpanBase
+          const pads = entryGridRef.current.querySelectorAll('button');
+          const padIdx = gateSpanBase - 1; // 0-indexed
+          if (padIdx < 0 || padIdx >= pads.length) return;
+          
+          const pad = pads[padIdx];
+          const rect = pad.getBoundingClientRect();
+          const clientX = e.clientX ?? e.touches?.[0]?.clientX ?? rect.left;
+          const xNorm = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+          
+          // FIX: Gate trim is 0-100% in 10% steps
+          // xNorm 0.0 = left edge = 10% of step-span
+          // xNorm 1.0 = right edge = 100% of step-span
+          // Snap to 10% increments
+          const xQuant = Math.round(xNorm * 10) / 10;
+          const gatePct = Math.max(0.1, xQuant); // Minimum 10%
+          
+          // newFraction represents how much to subtract from gateSpanBase
+          // gatePct=1.0 means full span, gatePct=0.5 means half span
+          const newFraction = 1 - gatePct;
+          
+          if (newFraction !== gateSpanFraction) {
+            setGateSpanFraction(newFraction);
+            // Apply immediately
+            const target = getGateTarget();
+            if (!target.error && selectedStepIdx !== null) {
+              const gateSteps = Math.max(0.1, gateSpanBase * gatePct);
+              const step = patternsRef.current[stateRef.current.activePatternIdx].steps[selectedStepIdx];
+              const newNotes = [...step.notes];
+
+              const idxs = target.noteIdxs && target.noteIdxs.length ? target.noteIdxs : [target.noteIdx];
+              idxs.forEach(i => {
+                if (i != null && i >= 0 && i < newNotes.length) {
+                  newNotes[i] = { ...newNotes[i], gateSteps };
+                }
+              });
+
+              updateStepByIdx(selectedStepIdx, { notes: newNotes });
+            }
+          }
+        };
+        
+        const handleUp = () => {
+          setIsSelectingGateSpan(false);
+          setGateSpanBase(null);
+          setGateSpanFraction(0);
+        };
+        
+        window.addEventListener('pointermove', handleMove);
+        window.addEventListener('pointerup', handleUp);
+        window.addEventListener('pointercancel', handleUp);
+        
+        return () => {
+          window.removeEventListener('pointermove', handleMove);
+          window.removeEventListener('pointerup', handleUp);
+          window.removeEventListener('pointercancel', handleUp);
+        };
+      }, [isSelectingGateSpan, gateSpanBase, gateSpanFraction, getGateTarget, selectedStepIdx, updateStepByIdx]);
+
+      // Note-first paint global handlers
+      useEffect(() => {
+        if (!isPainting) return;
+        const handleUp = () => handlePaintEnd();
+        window.addEventListener('pointerup', handleUp);
+        window.addEventListener('pointercancel', handleUp);
+        return () => {
+          window.removeEventListener('pointerup', handleUp);
+          window.removeEventListener('pointercancel', handleUp);
+        };
+      }, [isPainting, handlePaintEnd]);
+
+      // P0-2 FIX: Replace +12 MID with BASS -12/-24 macros
+      // Mechanical: add bass note L-offset where L = lowest pitched note
+      const addBassNote = useCallback((offset) => {
+        if (selectedStepIdx === null) return;
+        const step = patterns[state.activePatternIdx].steps[selectedStepIdx];
+        const pitched = step.notes.filter(n => isPitch(n.id));
+        if (pitched.length === 0) return;
+        
+        // Find lowest pitched note
+        const sorted = [...pitched].sort((a, b) => a.id - b.id);
+        const lowest = sorted[0];
+        const bassNoteId = lowest.id + offset; // offset is -12 or -24
+        
+        // Guard: if B < 0, do nothing
+        if (bassNoteId < 0) return;
+        
+        // Guard: if note already exists, do nothing (idempotent)
+        if (step.notes.some(n => n.id === bassNoteId)) return;
+        
+        // Create bass note copying params from lowest
+        const bassNote = {
+          ...createEmptyNote(bassNoteId),
+          velocity: lowest.velocity,
+          gateSteps: lowest.gateSteps ?? 1.0,
+          microTiming: lowest.microTiming,
+          macroA: lowest.macroA,
+          macroB: lowest.macroB,
+        };
+        
+        updateSelectedStep({ notes: [...step.notes, bassNote] });
+      }, [selectedStepIdx, patterns, state.activePatternIdx, updateSelectedStep]);
+
+      const canAddBass = useMemo(() => {
+        if (selectedStepIdx === null) return { m12: false, m24: false };
+        const step = patterns[state.activePatternIdx].steps[selectedStepIdx];
+        const pitched = step.notes.filter(n => isPitch(n.id));
+        if (pitched.length === 0) return { m12: false, m24: false };
+        
+        const lowest = Math.min(...pitched.map(n => n.id));
+        return {
+          m12: lowest - 12 >= 0 && !step.notes.some(n => n.id === lowest - 12),
+          m24: lowest - 24 >= 0 && !step.notes.some(n => n.id === lowest - 24),
+        };
+      }, [selectedStepIdx, patterns, state.activePatternIdx]);
+
+      // Fix 4: Make chord from single note (adds 3rd and 5th from scale)
+      // Fix 2: MAKE CHORD - Chromatic major triad (root + 4 + 7 semitones)
+      // Deterministic, no scale dependency, always produces major triad
+      // DIATONIC CHORD TOOLS: ADD 3RD, ADD 5TH, ADD 7TH, MAKE CHORD
+      // Base note = selected stack note; else lowest pitched note
+      // Adds diatonic chord tones in the active scale
+      const [chordError, setChordError] = useState(null);
+      
+      // Find scale degree of a note (0-6 for 7-note scales, or index in scale)
+      // Returns { degree, octave } or null if not in scale
+      const findScaleDegree = useCallback((noteId) => {
+        const pitch = noteId % 12;
+        const octave = Math.floor(noteId / 12);
+        const intervals = SCALES[state.scaleType];
+        
+        // Check each scale degree
+        for (let deg = 0; deg < intervals.length; deg++) {
+          const scalePitch = (state.rootNote + intervals[deg]) % 12;
+          if (pitch === scalePitch) {
+            return { degree: deg, octave };
+          }
+        }
+        return null; // Not in scale
+      }, [state.scaleType, state.rootNote]);
+      
+      // Get note ID for a scale degree offset from base
+      const getChordTone = useCallback((baseNoteId, degreeOffset) => {
+        const baseInfo = findScaleDegree(baseNoteId);
+        if (!baseInfo) return null;
+        
+        const intervals = SCALES[state.scaleType];
+        const targetDegree = baseInfo.degree + degreeOffset;
+        const octaveOffset = Math.floor(targetDegree / intervals.length);
+        const normalizedDegree = ((targetDegree % intervals.length) + intervals.length) % intervals.length;
+        
+        const targetPitch = (state.rootNote + intervals[normalizedDegree]) % 12;
+        let targetOctave = baseInfo.octave + octaveOffset;
+        let targetNoteId = targetOctave * 12 + targetPitch;
+        
+        // STRICTLY UPWARD: if target <= base, bump up an octave (no inversions)
+        if (targetNoteId <= baseNoteId) {
+          targetOctave += 1;
+          targetNoteId = targetOctave * 12 + targetPitch;
+        }
+        
+        if (targetNoteId < 0 || targetNoteId > 127) return null;
+        return targetNoteId;
+      }, [findScaleDegree, state.scaleType, state.rootNote]);
+      
+      // Get base note: selected stack note, else lowest pitched
+      const getBaseNote = useCallback(() => {
+        if (selectedStepIdx === null) return null;
+        const step = patterns[state.activePatternIdx].steps[selectedStepIdx];
+        const pitched = step.notes.filter(n => isPitch(n.id));
+        if (pitched.length === 0) return null;
+        
+        // Selected stack note if valid and pitched
+        if (selectedNoteIdx !== null && selectedNoteIdx < step.notes.length) {
+          const selected = step.notes[selectedNoteIdx];
+          if (isPitch(selected.id)) return selected;
+        }
+        
+        // Else lowest pitched
+        return pitched.reduce((a, b) => a.id < b.id ? a : b);
+      }, [selectedStepIdx, selectedNoteIdx, patterns, state.activePatternIdx]);
+      
+      // Add a diatonic chord tone (degreeOffset: 2=3rd, 4=5th, 6=7th)
+      const addChordTone = useCallback((degreeOffset) => {
+        if (selectedStepIdx === null) return;
+        const step = patterns[state.activePatternIdx].steps[selectedStepIdx];
+        const baseNote = getBaseNote();
+        if (!baseNote) return;
+        
+        // Check base is in scale
+        if (!findScaleDegree(baseNote.id)) {
+          setChordError('BASE NOT IN SCALE');
+          setTimeout(() => setChordError(null), 1500);
+          return;
+        }
+        
+        const targetNoteId = getChordTone(baseNote.id, degreeOffset);
+        if (targetNoteId === null) return;
+        
+        // Idempotent: no duplicates
+        if (step.notes.some(n => n.id === targetNoteId)) return;
+        
+        const newNotes = [...step.notes, {
+          ...createEmptyNote(targetNoteId),
+          velocity: baseNote.velocity,
+          gateSteps: baseNote.gateSteps ?? 1.0,
+          microTiming: baseNote.microTiming,
+          macroA: baseNote.macroA,
+          macroB: baseNote.macroB
+        }];
+        
+        updateSelectedStep({ notes: newNotes });
+      }, [selectedStepIdx, patterns, state.activePatternIdx, getBaseNote, findScaleDegree, getChordTone, updateSelectedStep]);
+      
+      // MAKE CHORD: add 3rd + 5th in one click
+      const makeChord = useCallback(() => {
+        if (selectedStepIdx === null) return;
+        const step = patterns[state.activePatternIdx].steps[selectedStepIdx];
+        const baseNote = getBaseNote();
+        if (!baseNote) return;
+        
+        if (!findScaleDegree(baseNote.id)) {
+          setChordError('BASE NOT IN SCALE');
+          setTimeout(() => setChordError(null), 1500);
+          return;
+        }
+        
+        const third = getChordTone(baseNote.id, 2);
+        const fifth = getChordTone(baseNote.id, 4);
+        
+        let newNotes = [...step.notes];
+        [third, fifth].forEach(noteId => {
+          if (noteId !== null && !newNotes.some(n => n.id === noteId)) {
+            newNotes.push({
+              ...createEmptyNote(noteId),
+              velocity: baseNote.velocity,
+              gateSteps: baseNote.gateSteps ?? 1.0,
+              microTiming: baseNote.microTiming,
+              macroA: baseNote.macroA,
+              macroB: baseNote.macroB
+            });
+          }
+        });
+        
+        if (newNotes.length > step.notes.length) {
+          updateSelectedStep({ notes: newNotes });
+        }
+      }, [selectedStepIdx, patterns, state.activePatternIdx, getBaseNote, findScaleDegree, getChordTone, updateSelectedStep]);
+      
+      // Check if chord tone can be added
+      // Fix 3: Chord buttons only work on 7-note scales (where 3RD/5TH/7TH labels are meaningful)
+      const isHeptatonicScale = useMemo(() => {
+        return SCALES[state.scaleType]?.length === 7;
+      }, [state.scaleType]);
+      
+      const canAddChordTone = useCallback((degreeOffset) => {
+        if (!isHeptatonicScale) return false; // Disable on non-7-note scales
+        if (selectedStepIdx === null) return false;
+        const step = patterns[state.activePatternIdx].steps[selectedStepIdx];
+        const baseNote = getBaseNote();
+        if (!baseNote) return false;
+        if (!findScaleDegree(baseNote.id)) return false;
+        
+        const targetNoteId = getChordTone(baseNote.id, degreeOffset);
+        if (targetNoteId === null) return false;
+        if (step.notes.some(n => n.id === targetNoteId)) return false;
+        return true;
+      }, [isHeptatonicScale, selectedStepIdx, patterns, state.activePatternIdx, getBaseNote, findScaleDegree, getChordTone]);
+      
+      const canMakeChord = useMemo(() => {
+        if (!isHeptatonicScale) return false;
+        return canAddChordTone(2) || canAddChordTone(4);
+      }, [isHeptatonicScale, canAddChordTone]);
+
+      // Fix 2: Arpeggio - writes to grid (not live processor)
+      // Takes chord on selected step, spreads notes across subsequent steps
+      // Fix 1: Arpeggio - preserves step data, STOPS at pattern end (no wrap)
+      const applyArpeggio = useCallback(() => {
+        if (selectedStepIdx === null || !state.arpEnabled) return;
+        const step = patterns[state.activePatternIdx].steps[selectedStepIdx];
+        const pitched = step.notes.filter(n => isPitch(n.id)).sort((a, b) => a.id - b.id);
+        if (pitched.length < 2) return; // Need at least 2 notes for arp
+        
+        // Build note sequence based on direction and octaves
+        let sequence = [];
+        for (let oct = 0; oct < state.arpOctaves; oct++) {
+          pitched.forEach(n => {
+            const noteId = n.id + (oct * 12);
+            if (noteId <= 127) sequence.push({ ...n, id: noteId });
+          });
+        }
+        
+        if (state.arpDirection === 'DOWN') {
+          sequence = sequence.reverse();
+        } else if (state.arpDirection === 'UP_DOWN') {
+          // Up then down (excluding endpoints to avoid repeats)
+          const down = sequence.slice(1, -1).reverse();
+          sequence = [...sequence, ...down];
+        } else if (state.arpDirection === 'DOWN_UP') {
+          // Down then up (excluding endpoints to avoid repeats)
+          const reversed = [...sequence].reverse();
+          const up = sequence.slice(1, -1);
+          sequence = [...reversed, ...up];
+        } else if (state.arpDirection === 'RANDOM') {
+          // Seeded shuffle - deterministic based on current seed
+          const seed = stateRef.current.randomSeed + stateRef.current.randomCounter;
+          const prng = mulberry32(seed);
+          // Fisher-Yates shuffle with seeded PRNG
+          for (let i = sequence.length - 1; i > 0; i--) {
+            const j = Math.floor(prng() * (i + 1));
+            [sequence[i], sequence[j]] = [sequence[j], sequence[i]];
+          }
+          // Increment counter so next random operation is different
+          setState(s => ({ ...s, randomCounter: s.randomCounter + 1 }));
+        }
+        
+        // Write to grid starting from selected step - STOPS at pattern end (no wrap)
+        const pattern = patterns[state.activePatternIdx];
+        const newSteps = [...pattern.steps];
+        sequence.forEach((note, i) => {
+          const targetIdx = selectedStepIdx + i;
+          // STOP at pattern end - do not wrap
+          if (targetIdx >= pattern.length) return;
+          
+          // PRESERVE existing step data - only change notes and active
+          const existingStep = newSteps[targetIdx];
+          // Preserve any existing DRUM hits on the target step.
+          // Only replace pitched notes, so arpeggio can never delete drums (v1.0 BLOCKER fix).
+          const existingDrums = existingStep.notes.filter(n => !isPitch(n.id));
+          newSteps[targetIdx] = {
+            ...existingStep, // Preserve id, accent, swing, ratchet, ratchetDecay
+            active: true,
+            // Preserve macroA, macroB, microTiming from SOURCE note (not existing step)
+            notes: [
+              ...existingDrums,
+              { 
+                ...createEmptyNote(note.id), 
+                velocity: note.velocity, 
+                gateSteps: note.gateSteps ?? 1.0, 
+                microTiming: note.microTiming,
+                macroA: note.macroA,
+                macroB: note.macroB
+              }
+            ],
+          };
+        });
+        
+        updateActivePattern({ steps: newSteps });
+      }, [selectedStepIdx, patterns, state.activePatternIdx, state.arpEnabled, state.arpDirection, state.arpOctaves, updateActivePattern]);
+
+      const canApplyArp = useMemo(() => {
+        if (selectedStepIdx === null || !state.arpEnabled) return false;
+        const step = patterns[state.activePatternIdx].steps[selectedStepIdx];
+        const pitched = step.notes.filter(n => isPitch(n.id));
+        return pitched.length >= 2;
+      }, [selectedStepIdx, patterns, state.activePatternIdx, state.arpEnabled]);
+
+      // P1-4: Seeded PRNG functions
+      // Fix 3: NEW SEED generates new random seed and applies it immediately
+      const reseed = useCallback(() => {
+        const newSeed = Math.floor(Math.random() * 0xFFFFFFFF);
+        setState(s => ({ ...s, randomSeed: newSeed, randomCounter: 0 }));
+        setSeedDraft(null); // Clear any draft
+      }, []);
+
+      // Fix 3: APPLY SEED commits the draft seed
+      const applySeed = useCallback(() => {
+        if (seedDraft === null) return;
+        setState(s => ({ ...s, randomSeed: seedDraft, randomCounter: 0 }));
+        setSeedDraft(null);
+      }, [seedDraft]);
+
+      const getSeededRandom = useCallback((count) => {
+        const seed = stateRef.current.randomSeed + stateRef.current.randomCounter;
+        const prng = mulberry32(seed);
+        const values = [];
+        for (let i = 0; i < count; i++) values.push(prng());
+        setState(s => ({ ...s, randomCounter: s.randomCounter + 1 }));
+        return values;
+      }, []);
+
+      const randomizeParameter = useCallback((param) => {
+        if (selectedStepIdx === null) return;
+        const step = patterns[state.activePatternIdx].steps[selectedStepIdx];
+        if (param === 'SWING') {
+          const [r] = getSeededRandom(1);
+          const val = SWING_PRESETS[Math.floor(r * SWING_PRESETS.length)];
+          updateSelectedStep({ swing: val });
+          return;
+        }
+        if (step.notes.length === 0) return;
+        const sortedIndices = step.notes.map((n, i) => ({ id: n.id, idx: i }))
+          .sort((a, b) => a.id - b.id).map(x => x.idx);
+        const randoms = getSeededRandom(sortedIndices.length);
+        const newNotes = [...step.notes];
+        // v068: GATE randomizes gateSteps (1-8 steps, with 0.5 increments)
+        const GATE_STEP_PRESETS = [0.5, 1, 1.5, 2, 2.5, 3, 4, 5, 6, 8];
+        sortedIndices.forEach((noteIdx, i) => {
+          const r = randoms[i];
+          if (param === 'VELOCITY') newNotes[noteIdx] = { ...newNotes[noteIdx], velocity: VELOCITY_PRESETS[Math.floor(r * VELOCITY_PRESETS.length)] };
+          else if (param === 'GATE') newNotes[noteIdx] = { ...newNotes[noteIdx], gateSteps: GATE_STEP_PRESETS[Math.floor(r * GATE_STEP_PRESETS.length)] };
+          else if (param === 'OFFSET') newNotes[noteIdx] = { ...newNotes[noteIdx], microTiming: OFFSET_PRESETS[Math.floor(r * OFFSET_PRESETS.length)] };
+          else if (param === 'MACRO_A') newNotes[noteIdx] = { ...newNotes[noteIdx], macroA: MACRO_PRESETS[Math.floor(r * MACRO_PRESETS.length)] };
+          else if (param === 'MACRO_B') newNotes[noteIdx] = { ...newNotes[noteIdx], macroB: MACRO_PRESETS[Math.floor(r * MACRO_PRESETS.length)] };
+        });
+        updateSelectedStep({ notes: newNotes });
+      }, [selectedStepIdx, patterns, state.activePatternIdx, getSeededRandom, updateSelectedStep]);
+
+      useEffect(() => {
+        midiService.initialize().then(() => setMidiOutputs(midiService.getOutputs()));
+        return () => {
+          stopSignalRef.current = true;
+          if (timerID.current) clearTimeout(timerID.current);
+          pendingTriggersRef.current.forEach(t => clearTimeout(t));
+          activeVoicesRef.current.forEach((voice) => {
+            if (voice.timeoutId) clearTimeout(voice.timeoutId);
+            if (voice.nodes) voice.nodes.forEach(node => { try { if (node.stop) node.stop(); if (node.disconnect) node.disconnect(); } catch(e) {} });
+          });
+          if (stateRef.current.midiOutputId) midiService.sendAllNotesOff(stateRef.current.midiOutputId, stateRef.current.midiChannel);
+          if (audioCtxRef.current && audioCtxRef.current.state !== 'closed') audioCtxRef.current.close().catch(() => {});
+        };
+      }, []);
+
+      const activePattern = patterns[state.activePatternIdx];
+
+      // C1: Stack display shows real identities, grouped by type
+      const getCellText = useCallback((step) => {
+        if (!step.active || step.notes.length === 0) return '';
+        const drums = step.notes.filter(n => isDrum(n.id));
+        const pitched = step.notes.filter(n => isPitch(n.id));
+        
+        let parts = [];
+        if (drums.length > 0) {
+          let drumStr = drums.slice(0, 2).map(n => getNoteLabel(n.id)).join(' ');
+          if (drums.length > 2) drumStr += ` +${drums.length - 2}`;
+          parts.push(drumStr);
+        }
+        if (pitched.length > 0) {
+          let pitchStr = pitched.slice(0, 2).map(n => getNoteLabel(n.id)).join(' ');
+          if (pitched.length > 2) pitchStr += ` +${pitched.length - 2}`;
+          parts.push(pitchStr);
+        }
+        return parts.join('|');
+      }, []);
+
+      // Execution pads
+      const executionPads = useMemo(() => activePattern.steps.map((step, idx) => {
+        const isOut = idx >= activePattern.length;
+        // v068: gateSteps is step-span, compute average for display
+        const avgGateSteps = step.notes.length > 0 ? step.notes.reduce((sum, n) => sum + (n.gateSteps ?? 1.0), 0) / step.notes.length : 1.0;
+        
+        // v068: In GATE mode, show step-span (e.g., "2.5 ST")
+        let mainValue = '';
+        if (isOut) {
+          mainValue = '---';
+        } else if (editMode === EditMode.GATE && step.notes.length > 0) {
+          mainValue = `${avgGateSteps % 1 === 0 ? avgGateSteps.toFixed(0) : avgGateSteps.toFixed(1)} ST`;
+        } else if (editMode === EditMode.SWING) {
+          mainValue = `${step.swing}%`;
+        } else {
+          mainValue = getCellText(step);
+        }
+        
+        return {
+          label: `ST_${idx + 1}`,
+          stepIdx: idx,
+          mainValue,
+          isActive: !isOut && step.active,
+          isCurrent: !isOut && state.currentStep === idx,
+          isSelected: !isOut && selectedStepIdx === idx,
+          isLocked: !isOut && step.accent,
+          isPaintTarget: paintTargets.has(idx),
+          semanticColor: isOut ? 'var(--disabled)' : step.accent ? 'var(--warn)' : 'var(--accent)',
+          gateValue: avgGateSteps / 16, // Normalize for gate bar display (0-1 range for bar width)
+          showGateBar: step.active,
+          isGateMode: editMode === EditMode.GATE,
+          onClick: () => { 
+            if (isOut) return;
+            if (inputFlow === InputFlow.NOTE_FIRST && heldNoteId !== null) {
+              const exists = step.notes.some(n => n.id === heldNoteId);
+              if (!exists) {
+                updateStepByIdx(idx, { active: true, notes: [...step.notes, createEmptyNote(heldNoteId)] });
+              }
+            } else {
+              setSelectedStepIdx(idx); 
+              setSelectedNoteIdx(0);
+              setStackNoteExplicit(false); // Clear explicit selection when changing steps
+            }
+          },
+          onPointerDown: (e) => {
+            if (isOut) return;
+            // v068: Removed gate drawing on execution pads - use entry pads for Circuit-style gate
+            if (inputFlow === InputFlow.NOTE_FIRST && heldNoteId !== null) {
+              handlePaintStart(idx);
+            }
+          },
+          onPointerEnter: () => {
+            if (isOut) return;
+            if (isPainting) handlePaintMove(idx);
+          },
+          onContextMenu: (e) => { e.preventDefault(); if (!isOut) updateStepByIdx(idx, { active: false, notes: [] }); }
+        };
+      }), [activePattern, state.currentStep, selectedStepIdx, editMode, getCellText, inputFlow, heldNoteId, isPainting, paintTargets, handlePaintStart, handlePaintMove, updateStepByIdx]);
+
+      // Entry pads
+      const entryPads = useMemo(() => {
+        if (editMode === EditMode.NOTE) {
+          return Array.from({length: 16}).map((_, i) => {
+            if (instrumentMode === 'MEL') {
+              if (i === 7) return { label: 'OCT+', mainValue: 'UP', semanticColor: 'var(--play)', isLocked: true, onClick: () => setOctaveShift(s => Math.min(s + 1, 4)) };
+              if (i === 15) return { label: 'OCT-', mainValue: 'DOWN', semanticColor: 'var(--play)', isLocked: true, onClick: () => setOctaveShift(s => Math.max(s - 1, -4)) };
+            }
+            const noteId = resolveNoteId(i, octaveShift, state.scaleType, state.rootNote, instrumentMode);
+            const currentStep = activePattern.steps[selectedStepIdx ?? 0];
+            const inStack = selectedStepIdx !== null && currentStep.notes.some(n => n.id === noteId);
+            const isHeld = heldNoteId === noteId;
+            
+            return {
+              label: isDrum(noteId) ? `D_${i + 1}` : `P_${i + 1}`,
+              mainValue: getNoteLabel(noteId),
+              isActive: inStack,
+              isSelected: isHeld,
+              semanticColor: 'var(--accent)',
+              onClick: () => {
+                if (inputFlow === InputFlow.NOTE_FIRST) {
+                  setHeldNoteId(isHeld ? null : noteId);
+                  playRefTone(noteId, 100, 300);
+                } else {
+                  // v068 FIX #2: Always write to step (default 0), select step 0 if nothing selected
+                  const stepIdx = selectedStepIdx ?? 0;
+                  const step = activePattern.steps[stepIdx];
+                  const actualInStack = step.notes.some(n => n.id === noteId);
+                  const nextNotes = state.stepRecord
+                    ? [createEmptyNote(noteId)]
+                    : actualInStack 
+                      ? step.notes.filter(n => n.id !== noteId) 
+                      : [...step.notes, createEmptyNote(noteId)];
+                  
+                  // Always commit edit
+                  updateStepByIdx(stepIdx, { active: nextNotes.length > 0, notes: nextNotes });
+                  
+                  // If nothing was selected, select step 0 so UI matches
+                  if (selectedStepIdx === null) setSelectedStepIdx(0);
+                  
+                  // Step-record advance
+                  if (state.stepRecord) setSelectedStepIdx(s => ((s ?? 0) + 1) % 16);
+                  
+                  playRefTone(noteId, 100, 300);
+                }
+              },
+              onContextMenu: (e) => { e.preventDefault(); playRefTone(noteId, 110, 300); }
+            };
+          });
+        } else if (editMode === EditMode.GATE) {
+          // v068: Circuit-style gate span selector (1-16 steps)
+          const target = getGateTarget();
+          const currentGateSteps = target.note?.gateSteps ?? 1.0;
+          const currentWhole = Math.ceil(currentGateSteps);
+          
+          return Array.from({length: 16}).map((_, i) => {
+            const spanValue = i + 1; // 1-16 steps
+            const isCurrentSpan = currentWhole === spanValue;
+            const hasHalfStep = currentGateSteps % 1 !== 0 && isCurrentSpan;
+            
+            return {
+              label: `${spanValue}`,
+              mainValue: spanValue === 1 ? '1 ST' : `${spanValue} ST`,
+              semanticColor: 'var(--accent)',
+              isActive: isCurrentSpan,
+              isSelected: isSelectingGateSpan && gateSpanBase === spanValue,
+              disabled: target.error !== null,
+              onPointerDown: target.error ? undefined : (e) => {
+                e.preventDefault();
+                setIsSelectingGateSpan(true);
+                setGateSpanBase(spanValue);
+                setGateSpanFraction(0);
+                // Immediate apply without fraction
+                applyGateSpan(spanValue, 0);
+              },
+              // P0 FIX: Add onClick for browsers that may miss onPointerDown
+              onClick: target.error ? undefined : () => {
+                // Only apply if not already selecting (avoid double-trigger)
+                if (!isSelectingGateSpan) {
+                  applyGateSpan(spanValue, 0);
+                }
+              }
+            };
+          });
+        } else {
+          // Other modes: VELOCITY, OFFSET, SWING, MACRO_A, MACRO_B
+          const presets = editMode === EditMode.VELOCITY ? VELOCITY_PRESETS :
+                         editMode === EditMode.OFFSET ? OFFSET_PRESETS :
+                         editMode === EditMode.SWING ? SWING_PRESETS : MACRO_PRESETS;
+          // v068 FIX #1: Normalize to 16 pads - pad with disabled placeholders
+          const filled = [...presets];
+          while (filled.length < 16) filled.push(null);
+          const normalized = filled.slice(0, 16);
+          
+          return normalized.map((val, i) => {
+            const isPlaceholder = (val === null);
+            return {
+              label: isPlaceholder ? '' : 'VAL', 
+              mainValue: isPlaceholder ? '' : val, 
+              semanticColor: 'var(--accent)',
+              isActive: false,
+              isSelected: false,
+              disabled: isPlaceholder,
+              onClick: isPlaceholder ? undefined : () => {
+                // Explicit mapping per edit mode
+                if (editMode === EditMode.VELOCITY) updateSelectedNote({ velocity: val });
+                else if (editMode === EditMode.OFFSET) updateSelectedNote({ microTiming: val });
+                else if (editMode === EditMode.MACRO_A) updateSelectedNote({ macroA: val });
+                else if (editMode === EditMode.MACRO_B) updateSelectedNote({ macroB: val });
+                else if (editMode === EditMode.SWING) updateSelectedStep({ swing: val });
+              }
+            };
+          });
+        }
+      }, [editMode, instrumentMode, octaveShift, state.scaleType, state.rootNote, selectedStepIdx, selectedNoteIdx, activePattern, updateSelectedStep, updateSelectedNote, updateStepByIdx, state.stepRecord, playRefTone, resolveNoteId, inputFlow, heldNoteId, getGateTarget, isSelectingGateSpan, gateSpanBase, applyGateSpan]);
+
+      return (
+        <div id="scale-container" style={{ width: CANONICAL_WIDTH, height: CANONICAL_HEIGHT, transform: `translate(-50%, -50%) scale(${scale})` }}>
+          <div className="h-full flex flex-col font-mono text-[11px] overflow-hidden select-none bg-[var(--bg)]" onContextMenu={e => e.preventDefault()}>
+            {/* HEADER */}
+            <header className="h-10 sg-panel border-x-0 border-t-0 flex items-center justify-between px-4 shrink-0 z-50">
+              <div className="flex items-center gap-4">
+                <span className="font-bold text-[var(--text)] text-[13px] tracking-tighter">STEPGRID<span className="text-[var(--accent)]">16</span> <span className="text-[9px] sg-dim">v1.0.0</span></span>
+                <div className="flex gap-2">
+                  <button onClick={togglePlay} className={`h-7 px-4 border font-bold flex items-center gap-2 transition-all ${state.isPlaying ? 'bg-[var(--text)] text-[var(--bg)] border-transparent' : 'bg-[var(--panel2)] text-[var(--accent)] border-[var(--line)]'}`}>
+                    <Icon name={state.isPlaying ? "Square" : "Play"} size={12} />
+                    <span className="tracking-widest">{state.isPlaying ? 'STOP' : 'START'}</span>
+                  </button>
+                  <button onClick={() => setState(s => ({...s, stepRecord: !s.stepRecord}))} className={`h-7 px-4 border font-bold flex items-center gap-2 transition-all ${state.stepRecord ? 'bg-[var(--accent)] text-[var(--bg)] border-transparent' : 'sg-dim border-[var(--line)]'}`}>
+                    <Icon name="Edit3" size={12} /><span>REC</span>
+                  </button>
+                </div>
+                <div className="h-7 flex items-center bg-[var(--bg)] px-3 border border-[var(--line)] ml-2">
+                  <span className="sg-label mr-2">BPM:</span>
+                  <input type="number" value={state.tempo} onChange={e => setState(s => ({...s, tempo: parseInt(e.target.value) || 120}))} className="w-10 bg-transparent text-[var(--accent)] text-right focus:outline-none sg-value text-[12px]" />
+                </div>
+                {/* v068 FIX #4: Strum is per-step, UI edits selected step only */}
+                {(() => {
+                  const stepStrum = selectedStepIdx !== null ? activePattern.steps[selectedStepIdx] : null;
+                  const strumPct = stepStrum?.strumAmountPct || 0;
+                  const strumDir = stepStrum?.strumDirection || 'DOWN';
+                  const hasStrum = strumPct > 0;
+                  const disabled = selectedStepIdx === null;
+                  return (
+                    <div className={`h-7 flex items-center px-2 border ${hasStrum ? 'bg-[var(--warn)] border-transparent' : 'bg-[var(--bg)] border-[var(--line)]'} ${disabled ? 'opacity-50' : ''}`}>
+                      <span className={`text-[7px] font-bold mr-1 ${hasStrum ? 'text-[var(--bg)]' : 'sg-label'}`}>STRUM:</span>
+                      <input 
+                        type="range" 
+                        min="0" 
+                        max="100" 
+                        step="10" 
+                        value={strumPct}
+                        disabled={disabled}
+                        onChange={e => {
+                          // Quantize to 10% steps
+                          const val = Math.round(parseInt(e.target.value) / 10) * 10;
+                          updateSelectedStep({ strumAmountPct: val });
+                        }}
+                        className="w-12 h-3 accent-[var(--bg)]"
+                      />
+                      <span className={`text-[8px] font-bold w-7 text-center ${hasStrum ? 'text-[var(--bg)]' : 'text-[var(--accent)]'}`}>{strumPct}%</span>
+                      <select 
+                        value={strumDir}
+                        disabled={disabled}
+                        onChange={e => updateSelectedStep({ strumDirection: e.target.value })}
+                        className={`text-[7px] font-bold outline-none ml-1 ${hasStrum ? 'bg-[var(--warn)] text-[var(--bg)]' : 'bg-transparent text-[var(--accent)]'}`}
+                      >
+                        <option value="DOWN">DOWN</option>
+                        <option value="UP">UP</option>
+                        <option value="BOUNCE">BOUNCE</option>
+                      </select>
+                    </div>
+                  );
+                })()}
+                {/* v068: Preview volume/mute */}
+                <div className="h-7 flex items-center bg-[var(--bg)] px-2 border border-[var(--line)] gap-1">
+                  <button 
+                    onClick={() => setState(s => ({...s, previewMuted: !s.previewMuted}))}
+                    className={`px-1.5 py-0.5 text-[7px] font-bold ${state.previewMuted ? 'bg-[var(--neg)] text-[var(--bg)]' : 'sg-dim hover:text-[var(--accent)]'}`}
+                  >
+                    {state.previewMuted ? 'MUTED' : 'MUTE'}
+                  </button>
+                  <Icon name={state.previewMuted ? "VolumeX" : state.previewVolumePct < 50 ? "Volume1" : "Volume2"} size={10} className={state.previewMuted ? 'text-[var(--neg)]' : 'sg-dim'} />
+                  <input 
+                    type="range" 
+                    min="0" 
+                    max="100" 
+                    step="10" 
+                    value={state.previewVolumePct}
+                    onChange={e => setState(s => ({...s, previewVolumePct: parseInt(e.target.value)}))}
+                    disabled={state.previewMuted}
+                    className={`w-10 h-3 ${state.previewMuted ? 'opacity-30' : ''}`}
+                  />
+                  <span className={`text-[7px] font-bold w-6 ${state.previewMuted ? 'text-[var(--neg)]' : state.previewVolumePct < 100 ? 'text-[var(--warn)]' : 'sg-dim'}`}>
+                    {state.previewVolumePct}%
+                  </span>
+                </div>
+              </div>
+              <div className="flex items-center gap-4">
+                {/* Fix 3: Seed input with draft + APPLY SEED + NEW SEED */}
+                <div className="flex items-center gap-1 bg-[var(--bg)] border border-[var(--line)] px-2 h-7">
+                  <span className="text-[7px] sg-label">SEED:</span>
+                  <input 
+                    type="text" 
+                    value={(seedDraft !== null ? seedDraft : state.randomSeed).toString(16).toUpperCase().padStart(8, '0')}
+                    onChange={e => {
+                      const val = parseInt(e.target.value, 16);
+                      if (!isNaN(val) && val >= 0 && val <= 0xFFFFFFFF) {
+                        setSeedDraft(val); // Edit goes to draft, not committed
+                      }
+                    }}
+                    className={`w-16 text-[9px] font-bold font-mono bg-transparent outline-none text-center ${seedDraft !== null ? 'text-[var(--warn)]' : 'text-[var(--accent)]'}`}
+                    maxLength={8}
+                  />
+                  <button 
+                    onClick={applySeed} 
+                    disabled={seedDraft === null}
+                    className={`px-1 text-[7px] font-bold border border-[var(--line)] ${seedDraft !== null ? 'text-[var(--warn)] hover:bg-[var(--panel2)]' : 'sg-disabled opacity-30'}`}
+                  >
+                    APPLY
+                  </button>
+                  <button onClick={reseed} className="px-1 text-[7px] sg-label border border-[var(--line)] hover:text-[var(--accent)]">
+                    NEW SEED
+                  </button>
+                </div>
+                <div className="flex items-center gap-2 bg-[var(--panel2)] border border-[var(--line)] px-2 h-7">
+                  <Icon name="Activity" size={10} className={state.isPlaying ? 'text-[var(--accent)]' : 'sg-dim'} />
+                  <select className="bg-transparent text-[var(--accent)] font-bold outline-none text-[10px] min-w-[80px]" value={state.midiOutputId || ''} onChange={e => setState(s => ({ ...s, midiOutputId: e.target.value }))}>
+                    {midiOutputs.length === 0 ? <option value="">NO MIDI</option> : null}
+                    {midiOutputs.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
+                  </select>
+                  <div className="border-l border-[var(--line)] ml-2 pl-2 flex items-center gap-1">
+                    <span className="text-[8px] sg-dim">CH:</span>
+                    <input type="number" min="1" max="16" value={state.midiChannel} onChange={e => setState(s => ({...s, midiChannel: Math.max(1, Math.min(16, parseInt(e.target.value) || 1))}))} className="w-5 bg-transparent text-[var(--accent)] font-bold outline-none text-[10px]" />
+                  </div>
+                </div>
+                <button onClick={() => downloadMidi(patterns, state.chain, state.activePatternIdx, state.tempo, state.midiChannel, state.macroCC_A, state.macroCC_B)} className="h-7 px-3 border border-[var(--line)] sg-label hover:bg-[var(--panel2)] flex items-center gap-1 text-[8px] font-bold">
+                  <Icon name="Download" size={12} /> EXPORT MIDI
+                </button>
+              </div>
+            </header>
+
+            {/* MAIN CONTENT */}
+            <div className="flex-1 flex flex-col p-2 gap-2 w-full overflow-hidden">
+              {/* PATTERN BAR */}
+              <div className="flex flex-col gap-1.5 shrink-0 bg-[var(--panel)] p-1.5 border border-[var(--line)]">
+                <div className="flex gap-1.5 h-8">
+                  {Array.from({length: 8}).map((_, i) => {
+                    const chainCount = state.chain.filter(x => x === i).length;
+                    const activeInChain = state.chainEnabled && state.chain[state.chainStep] === i && state.isPlaying;
+                    return (
+                      <button key={i} onClick={() => setState(s => ({...s, activePatternIdx: i}))} onContextMenu={(e) => { e.preventDefault(); addToChain(i); }} className={`flex-1 border text-[10px] font-bold transition-all relative ${state.activePatternIdx === i ? 'bg-[var(--accent)] text-[var(--bg)] border-transparent' : activeInChain ? 'bg-[var(--play)] text-[var(--text)] border-[var(--line2)]' : 'bg-[var(--cell)] sg-dim border-[var(--line)] hover:border-[var(--line2)]'}`}>
+                        P{i+1} {chainCount > 0 && <span className="absolute top-0 right-1 text-[7px] text-[var(--accent)]">({chainCount})</span>}
+                      </button>
+                    );
+                  })}
+                </div>
+                <div className="flex items-center justify-between px-1 h-6">
+                  <div className="flex gap-3 items-center">
+                    <div className="flex gap-2">
+                      <button onClick={clearPattern} className="sg-label hover:text-[var(--neg)]"><Icon name="Eraser" size={10} /> CLEAR</button>
+                      <button onClick={copyPattern} className="sg-label hover:text-[var(--accent)]"><Icon name="Copy" size={10} /> COPY</button>
+                      <button onClick={pastePattern} disabled={!clipboardPattern} className={`sg-label ${clipboardPattern ? 'hover:text-[var(--accent)]' : 'opacity-20'}`}><Icon name="Clipboard" size={10} /> PASTE</button>
+                    </div>
+                    <div className="w-[1px] h-3 bg-[var(--line)]" />
+                    <div className="flex gap-2">
+                      <button onClick={() => setState(s => ({...s, chainEnabled: !s.chainEnabled}))} className={`flex items-center gap-1 px-2 h-5 border font-bold text-[8px] ${state.chainEnabled ? 'bg-[var(--accent)] text-[var(--bg)] border-transparent' : 'sg-dim border-[var(--line)]'}`}>
+                        <Icon name="Link" size={10} /> {state.chainEnabled ? 'CHAIN: ON' : 'CHAIN'}
+                      </button>
+                      <button onClick={() => setState(s => ({...s, chainLoop: !s.chainLoop}))} className={`flex items-center gap-1 px-2 h-5 border font-bold text-[8px] ${state.chainLoop ? 'bg-[var(--play)] text-[var(--text)] border-transparent' : 'sg-dim border-[var(--line)]'}`}>
+                        <Icon name="Repeat" size={10} /> {state.chainLoop ? 'LOOP' : 'ONCE'}
+                      </button>
+                      <button onClick={() => setState(s => ({...s, chain: []}))} className="sg-label hover:text-[var(--neg)] text-[8px]"><Icon name="Trash2" size={10} /> CLEAR CHAIN</button>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="sg-label">PATTERN LENGTH:</span>
+                    <input type="number" min="1" max="16" value={activePattern.length} onChange={e => updateActivePattern({ length: Math.max(1, Math.min(16, parseInt(e.target.value) || 16)) })} className="w-6 bg-transparent text-[var(--accent)] font-bold outline-none text-right text-[10px]" />
+                  </div>
+                </div>
+                {state.chain.length > 0 && (
+                  <div className="flex gap-1 items-center overflow-x-auto no-scrollbar border-t border-[var(--line)] pt-1">
+                    <span className="sg-label mr-2 shrink-0">SEQUENCE:</span>
+                    {state.chain.map((idx, i) => (
+                      <span key={i} className={`px-1.5 py-0.5 border text-[7px] font-bold ${state.chainStep === i && state.isPlaying ? 'bg-[var(--accent)] text-[var(--bg)] border-transparent' : 'bg-[var(--bg)] sg-dim border-[var(--line)]'}`}>P{idx + 1}</span>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* GRIDS */}
+              <div className="flex-1 flex flex-col gap-2 min-h-0">
+                <div className="flex flex-col gap-1">
+                  <span className="sg-label flex justify-between">
+                    EXECUTION 
+                    <span className="text-[7px]">
+                      {inputFlow === InputFlow.NOTE_FIRST && heldNoteId !== null ? `PAINT: ${getNoteLabel(heldNoteId)}` : 
+                       'R-CLICK: CLEAR'}
+                    </span>
+                  </span>
+                  <PadGrid pads={executionPads} gridRef={executionGridRef} />
+                </div>
+
+                <div className="flex justify-between items-center h-8 shrink-0 bg-[var(--panel)] px-2 border border-[var(--line)]">
+                  <div className="flex items-center gap-3">
+                    <div className="flex p-0.5 bg-[var(--bg)] border border-[var(--line)] h-7">
+                      <button onClick={() => { setInstrumentMode('MEL'); setHeldNoteId(null); }} className={`px-3 flex items-center gap-1 text-[8px] font-bold ${instrumentMode === 'MEL' ? 'bg-[var(--accent)] text-[var(--bg)]' : 'sg-dim'}`}><Icon name="Music" size={11} />MELODY</button>
+                      <button onClick={() => { setInstrumentMode('DRUM'); setHeldNoteId(null); }} className={`px-3 flex items-center gap-1 text-[8px] font-bold ${instrumentMode === 'DRUM' ? 'bg-[var(--accent)] text-[var(--bg)]' : 'sg-dim'}`}><Icon name="Disc" size={11} />DRUMS</button>
+                    </div>
+                    {/* D2: Input flow toggle - explicit and visible */}
+                    <div className="flex p-0.5 bg-[var(--bg)] border border-[var(--line)] h-7">
+                      <button onClick={() => { setInputFlow(InputFlow.STEP_FIRST); setHeldNoteId(null); }} className={`px-2 flex items-center gap-1 text-[8px] font-bold ${inputFlow === InputFlow.STEP_FIRST ? 'bg-[var(--accent)] text-[var(--bg)]' : 'sg-dim'}`}>
+                        <Icon name="Grid3x3" size={10} />STEP-FIRST
+                      </button>
+                      <button onClick={() => setInputFlow(InputFlow.NOTE_FIRST)} className={`px-2 flex items-center gap-1 text-[8px] font-bold ${inputFlow === InputFlow.NOTE_FIRST ? 'bg-[var(--warn)] text-[var(--bg)]' : 'sg-dim'}`}>
+                        <Icon name="PenTool" size={10} />NOTE-FIRST
+                      </button>
+                    </div>
+                    {/* Fix 2: Arpeggio controls - explicit ON/OFF, grid-writing mode */}
+                    <div className="flex items-center bg-[var(--bg)] px-2 h-7 border border-[var(--line)] gap-2">
+                      <span className="sg-label text-[7px]">ARPEGGIO:</span>
+                      <button 
+                        onClick={() => setState(s => ({ ...s, arpEnabled: !s.arpEnabled }))}
+                        className={`px-2 text-[8px] font-bold ${state.arpEnabled ? 'bg-[var(--accent)] text-[var(--bg)]' : 'sg-dim'}`}
+                      >
+                        {state.arpEnabled ? 'ON' : 'OFF'}
+                      </button>
+                      {state.arpEnabled && (
+                        <>
+                          <select 
+                            value={state.arpDirection}
+                            onChange={e => setState(s => ({ ...s, arpDirection: e.target.value }))}
+                            className="bg-transparent text-[var(--accent)] font-bold outline-none text-[8px]"
+                          >
+                            <option value="UP">UP</option>
+                            <option value="DOWN">DOWN</option>
+                            <option value="UP_DOWN">UP THEN DOWN</option>
+                            <option value="DOWN_UP">DOWN THEN UP</option>
+                            <option value="RANDOM">RANDOM (SEEDED)</option>
+                          </select>
+                          <select 
+                            value={state.arpOctaves}
+                            onChange={e => setState(s => ({ ...s, arpOctaves: parseInt(e.target.value) }))}
+                            className="bg-transparent text-[var(--accent)] font-bold outline-none text-[8px]"
+                          >
+                            <option value={1}>1 OCT</option>
+                            <option value={2}>2 OCT</option>
+                            <option value={3}>3 OCT</option>
+                          </select>
+                          <button 
+                            onClick={applyArpeggio}
+                            disabled={!canApplyArp}
+                            className={`px-2 text-[7px] font-bold border border-[var(--line)] ${canApplyArp ? 'text-[var(--accent)] hover:bg-[var(--panel2)]' : 'sg-disabled opacity-30'}`}
+                          >
+                            APPLY TO GRID
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex gap-2 items-center">
+                    {/* P0-3: Ratchet controls with explicit labels */}
+                    <div className="flex items-center bg-[var(--bg)] px-2 h-7 border border-[var(--line)] gap-2">
+                      <span className="sg-label text-[7px]">RATCHET:</span>
+                      <select 
+                        value={selectedStepIdx !== null ? activePattern.steps[selectedStepIdx].ratchet || 1 : 1}
+                        onChange={e => updateSelectedStep({ ratchet: parseInt(e.target.value) })}
+                        disabled={selectedStepIdx === null}
+                        className="bg-transparent text-[var(--accent)] font-bold outline-none text-[9px] w-10"
+                      >
+                        {RATCHET_VALUES.map(v => <option key={v} value={v}>{v === 1 ? 'OFF' : 'x' + v}</option>)}
+                      </select>
+                      <span className="sg-label text-[7px] border-l border-[var(--line)] pl-2">MODE:</span>
+                      <button
+                        onClick={() => updateSelectedStep({ ratchetDecay: !activePattern.steps[selectedStepIdx]?.ratchetDecay })}
+                        disabled={selectedStepIdx === null || (activePattern.steps[selectedStepIdx]?.ratchet || 1) === 1}
+                        className={`px-1 font-bold text-[7px] ${
+                          selectedStepIdx !== null && activePattern.steps[selectedStepIdx]?.ratchetDecay 
+                            ? 'bg-[var(--warn)] text-[var(--bg)]' 
+                            : 'text-[var(--accent)]'
+                        } ${(selectedStepIdx === null || (activePattern.steps[selectedStepIdx]?.ratchet || 1) === 1) ? 'opacity-30' : ''}`}
+                      >{selectedStepIdx !== null && activePattern.steps[selectedStepIdx]?.ratchetDecay ? 'DECAY' : 'CONST'}</button>
+                    </div>
+                    <div className="flex items-center bg-[var(--bg)] px-2 h-7 border border-[var(--line)] gap-2">
+                      <span className="sg-label">ATTACK/RELEASE:</span>
+                      <input type="number" value={state.attackMs} onChange={e => setState(s => ({...s, attackMs: parseInt(e.target.value) || 0}))} className="w-5 bg-transparent text-[var(--accent)] font-bold focus:outline-none text-[10px]" />
+                      <input type="number" value={state.releaseMs} onChange={e => setState(s => ({...s, releaseMs: parseInt(e.target.value) || 0}))} className="w-5 bg-transparent text-[var(--accent)] font-bold focus:outline-none text-[10px]" />
+                    </div>
+                    <button
+                      onClick={() => { if (selectedStepIdx !== null) updateSelectedStep({ accent: !activePattern.steps[selectedStepIdx].accent }); }}
+                      disabled={selectedStepIdx === null}
+                      className={`h-7 px-3 border font-bold text-[9px] ${
+                        selectedStepIdx === null ? 'sg-disabled border-[var(--line)] opacity-50' :
+                        activePattern.steps[selectedStepIdx].accent ? 'bg-[var(--warn)] text-[var(--bg)] border-transparent' :
+                        'sg-dim border-[var(--line)]'
+                      }`}
+                    >ACC</button>
+                  </div>
+                </div>
+
+                <div className="flex flex-col gap-1">
+                  <span className="sg-label flex justify-between">
+                    ENTRY
+                    {editMode === EditMode.GATE && (
+                      <span className="text-[7px]">
+                        {gateTargetError ? <span className="text-[var(--neg)]">{gateTargetError}</span> : 'CLICK: SET SPAN | DRAG: 10-100%'}
+                      </span>
+                    )}
+                  </span>
+                  <PadGrid pads={entryPads} gridRef={entryGridRef} />
+                </div>
+              </div>
+
+              {/* BOTTOM PANEL */}
+              <div className="flex flex-col gap-2 shrink-0 bg-[var(--panel2)] p-2 border border-[var(--line)]">
+                <div className="flex items-center justify-between">
+                  <div className="flex gap-1.5 items-center">
+                    <div className="flex h-7 bg-[var(--bg)] p-0.5 border border-[var(--line)]">
+                      {[EditMode.NOTE, EditMode.VELOCITY, EditMode.GATE, EditMode.OFFSET, EditMode.SWING, EditMode.MACRO_A, EditMode.MACRO_B].map(m => (
+                        <button key={m} onClick={() => setEditMode(m)} className={`px-2 border font-bold text-[7px] ${editMode === m ? 'bg-[var(--accent)] text-[var(--bg)] border-transparent' : 'sg-dim border-transparent'}`}>{m === 'MACRO_A' ? 'MACRO A' : m === 'MACRO_B' ? 'MACRO B' : m === 'OFFSET' ? 'MICROTIMING' : m}</button>
+                      ))}
+                    </div>
+                    {/* P1-4: Randomize button with text */}
+                    {editMode !== EditMode.NOTE && (
+                      <button
+                        onClick={() => randomizeParameter(editMode)}
+                        disabled={selectedStepIdx === null}
+                        className={`h-7 px-2 border flex items-center gap-1 font-bold text-[7px] ${
+                          selectedStepIdx !== null ? 'text-[var(--accent)] border-[var(--line)] hover:bg-[var(--panel2)]' : 'sg-disabled border-[var(--line)] opacity-30'
+                        }`}
+                      >
+                        RANDOMIZE
+                      </button>
+                    )}
+                    {/* v068 FIX #3: Show exact gateSteps for targeted note in GATE mode */}
+                    {editMode === EditMode.GATE && (() => {
+                      const target = getGateTarget();
+                      const gateSteps = target.note?.gateSteps ?? 1.0;
+                      const displayVal = gateSteps % 1 === 0 ? gateSteps.toFixed(0) : gateSteps.toFixed(2).replace(/0$/, '');
+                      return (
+                        <div className="h-7 px-3 border border-[var(--line)] bg-[var(--bg)] flex items-center gap-2">
+                          <span className="sg-label text-[7px]">GATE:</span>
+                          <span className="text-[var(--accent)] font-bold text-[10px]">
+                            {target.error ? <span className="text-[var(--neg)]">{target.error}</span> : `${displayVal} STEPS`}
+                          </span>
+                        </div>
+                      );
+                    })()}
+                    {/* P0-2 FIX: BASS -12/-24 macros replace +12 MID */}
+                    {editMode === EditMode.NOTE && (
+                      <>
+                        <button
+                          onClick={() => addBassNote(-12)}
+                          disabled={!canAddBass.m12}
+                          className={`h-7 px-2 border flex items-center gap-1 font-bold text-[8px] ${
+                            canAddBass.m12 ? 'sg-dim border-[var(--line)] hover:text-[var(--accent)]' : 'sg-disabled border-[var(--line)] opacity-30'
+                          }`}
+                        >
+                          <Icon name="ArrowDown" size={10} /> VOICING: −1 OCT
+                        </button>
+                        <button
+                          onClick={() => addBassNote(-24)}
+                          disabled={!canAddBass.m24}
+                          className={`h-7 px-2 border flex items-center gap-1 font-bold text-[8px] ${
+                            canAddBass.m24 ? 'sg-dim border-[var(--line)] hover:text-[var(--accent)]' : 'sg-disabled border-[var(--line)] opacity-30'
+                          }`}
+                        >
+                          <Icon name="ArrowDown" size={10} /> VOICING: −2 OCT
+                        </button>
+                        {/* DIATONIC CHORD TOOLS */}
+                        <button
+                          onClick={() => addChordTone(2)}
+                          disabled={!canAddChordTone(2)}
+                          className={`h-7 px-2 border font-bold text-[7px] ${
+                            canAddChordTone(2) ? 'text-[var(--accent)] border-[var(--line)] hover:bg-[var(--panel2)]' : 'sg-disabled border-[var(--line)] opacity-30'
+                          }`}
+                        >
+                          ADD 3RD
+                        </button>
+                        <button
+                          onClick={() => addChordTone(4)}
+                          disabled={!canAddChordTone(4)}
+                          className={`h-7 px-2 border font-bold text-[7px] ${
+                            canAddChordTone(4) ? 'text-[var(--accent)] border-[var(--line)] hover:bg-[var(--panel2)]' : 'sg-disabled border-[var(--line)] opacity-30'
+                          }`}
+                        >
+                          ADD 5TH
+                        </button>
+                        <button
+                          onClick={() => addChordTone(6)}
+                          disabled={!canAddChordTone(6)}
+                          className={`h-7 px-2 border font-bold text-[7px] ${
+                            canAddChordTone(6) ? 'text-[var(--accent)] border-[var(--line)] hover:bg-[var(--panel2)]' : 'sg-disabled border-[var(--line)] opacity-30'
+                          }`}
+                        >
+                          ADD 7TH
+                        </button>
+                        <button
+                          onClick={() => addChordTone(8)}
+                          disabled={!canAddChordTone(8)}
+                          className={`h-7 px-2 border font-bold text-[7px] ${
+                            canAddChordTone(8) ? 'text-[var(--accent)] border-[var(--line)] hover:bg-[var(--panel2)]' : 'sg-disabled border-[var(--line)] opacity-30'
+                          }`}
+                        >
+                          ADD 9TH
+                        </button>
+                        <button
+                          onClick={() => addChordTone(10)}
+                          disabled={!canAddChordTone(10)}
+                          className={`h-7 px-2 border font-bold text-[7px] ${
+                            canAddChordTone(10) ? 'text-[var(--accent)] border-[var(--line)] hover:bg-[var(--panel2)]' : 'sg-disabled border-[var(--line)] opacity-30'
+                          }`}
+                        >
+                          ADD 11TH
+                        </button>
+                        <button
+                          onClick={makeChord}
+                          disabled={!canMakeChord}
+                          className={`h-7 px-2 border font-bold text-[7px] ${
+                            canMakeChord ? 'bg-[var(--accent)] text-[var(--bg)] border-transparent hover:opacity-90' : 'sg-disabled border-[var(--line)] opacity-30'
+                          }`}
+                        >
+                          MAKE CHORD
+                        </button>
+                        {chordError && (
+                          <span className="text-[var(--neg)] text-[7px] font-bold ml-2 animate-pulse">{chordError}</span>
+                        )}
+                      </>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="sg-label">SCALE:</span>
+                    <div className="flex bg-[var(--bg)] p-0.5 border border-[var(--line)]">
+                      <select value={state.rootNote} onChange={e => setState(s => ({...s, rootNote: parseInt(e.target.value)}))} className="bg-transparent text-[var(--accent)] font-bold text-[9px] outline-none">
+                        {["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"].map((n, i) => <option key={n} value={i}>{n}</option>)}
+                      </select>
+                      <select value={state.scaleType} onChange={e => setState(s => ({...s, scaleType: e.target.value}))} className="bg-transparent text-[var(--text)] font-bold text-[9px] outline-none border-l border-[var(--line)] pl-1">
+                        {Object.values(ScaleType).map(st => <option key={st} value={st}>{st}</option>)}
+                      </select>
+                    </div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-3 h-8 bg-[var(--bg)] px-3 border border-[var(--line)]">
+                  <div className="flex items-center gap-2 pr-3 border-r border-[var(--line)] h-full">
+                    <span className="sg-label">FOCUS:</span>
+                    <span className="text-[11px] font-bold text-[var(--text)]">ST_{selectedStepIdx !== null ? String(selectedStepIdx + 1).padStart(2, '0') : '--'}</span>
+                  </div>
+                  {/* Fix 5: Step copy/paste */}
+                  <div className="flex items-center gap-1 pr-3 border-r border-[var(--line)] h-full">
+                    <button onClick={copyStep} disabled={selectedStepIdx === null} className={`px-2 text-[7px] font-bold ${selectedStepIdx !== null ? 'sg-label hover:text-[var(--accent)]' : 'sg-disabled opacity-30'}`}>COPY STEP</button>
+                    <button onClick={pasteStep} disabled={selectedStepIdx === null || !clipboardStep} className={`px-2 text-[7px] font-bold ${selectedStepIdx !== null && clipboardStep ? 'sg-label hover:text-[var(--accent)]' : 'sg-disabled opacity-30'}`}>PASTE STEP</button>
+                  </div>
+                  <div className="flex-1 flex items-center gap-2 overflow-x-auto no-scrollbar">
+                    <span className="sg-label">STACK:</span>
+                    <div className="flex gap-1">
+                      {/* C1, C2: Stack shows real identities - text is sufficient */}
+                      {selectedStepIdx !== null && activePattern.steps[selectedStepIdx].notes.map((n, i) => (
+                        <button 
+                          key={i} 
+                          onClick={() => {
+                            // Toggle: clicking same note again reverts to chord targeting
+                            if (selectedNoteIdx === i && stackNoteExplicit) {
+                              setStackNoteExplicit(false);
+                            } else {
+                              setSelectedNoteIdx(i);
+                              setStackNoteExplicit(true);
+                            }
+                          }} 
+                          className={`px-2 py-0.5 border text-[9px] font-bold ${
+                            selectedNoteIdx === i && stackNoteExplicit ? 'bg-[var(--accent)] text-[var(--bg)] border-transparent' : 'bg-[var(--panel)] border-[var(--line)] sg-dim'
+                          }`}
+                        >
+                          {getNoteLabel(n.id)}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          
+          {showScaleWarning && <div className="scale-warning">SMALL SCREEN</div>}
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
